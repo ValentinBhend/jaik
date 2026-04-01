@@ -7,11 +7,19 @@ name = "jaik"
 version = "0.0.2"
 description = "Coming soon."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
   { name = "Valentin Bhend", email = "bhed@zhaw.ch" }
 ]
+dependencies = [
+    "linearsubproblemsltns>=1.0.3",
+    "numpy>=1.24.4",
+]
 
 [project.urls]
-Homepage = "https://github.com/ValentinBhend/jaik"
 Repository = "https://github.com/ValentinBhend/jaik"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
