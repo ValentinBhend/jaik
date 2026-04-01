@@ -12,6 +12,9 @@ authors = [
   { name = "Valentin Bhend", email = "bhed@zhaw.ch" }
 ]
 dependencies = [
+    "beartype>=0.22.9",
+    "jax>=0.6.2",
+    "jaxtyping>=0.3.7",
     "linearsubproblemsltns>=1.0.3",
     "numpy>=1.24.4",
 ]

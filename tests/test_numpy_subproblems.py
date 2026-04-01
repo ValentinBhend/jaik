@@ -79,9 +79,6 @@ class TestSP2:
             p1 = _rot(k1, -t1_true) @ target
             p2 = _rot(k2, -t2_true) @ target
 
-            p1_orig = p1.copy()
-            p2_orig = p2.copy()
-
             t1s, t2s, is_LS = sp2(p1, p2, k1, k2)
 
             if is_LS:
@@ -90,8 +87,8 @@ class TestSP2:
             thetas = list(zip(t1s.flatten(), t2s.flatten()))
             found = False
             for t1, t2 in thetas:
-                lhs = _rot(k1, t1) @ p1_orig
-                rhs = _rot(k2, t2) @ p2_orig
+                lhs = _rot(k1, t1) @ p1
+                rhs = _rot(k2, t2) @ p2
                 if np.allclose(lhs, rhs, atol=1e-8):
                     found = True
                     break
@@ -112,21 +109,18 @@ class TestSP2:
             assert len(t1s.flatten()) <= 2
             assert len(t2s.flatten()) <= 2
 
-    def test_mutates_inputs(self):
-        """
-        sp2 normalises p1, p2 in-place — document this known behaviour.
-        Callers must copy inputs if they need them afterwards.
-        """
+    def test_does_not_mutate_inputs(self):
+        """sp2 must not modify the caller's arrays."""
         rng = np.random.default_rng(5)
         k1 = rand_unit(rng)
         k2 = rand_unit(rng)
-        p1 = rand_vec(rng) * 5.0   # non-unit vector
+        p1 = rand_vec(rng) * 5.0
         p2 = rand_vec(rng) * 3.0
         p1_before = p1.copy()
+        p2_before = p2.copy()
         sp2(p1, p2, k1, k2)
-        # after the call p1 is normalised — this is expected behaviour
-        assert not np.allclose(p1, p1_before), \
-            "sp2 should normalise p1 in-place (document this)"
+        np.testing.assert_array_equal(p1, p1_before, err_msg="sp2 mutated p1")
+        np.testing.assert_array_equal(p2, p2_before, err_msg="sp2 mutated p2")
 
 
 # ─── SP3: find theta such that |R(k,theta)·p - q| = d ──────────────────────
@@ -236,8 +230,8 @@ class TestSP4:
         Reproduce the SP4 call for q1 in the UR IK pipeline.
         At q1=0, the solution theta=0 must be among the returned values.
         """
-        from jaik._numpy.convention_conversions import dh_to_kin
-        from jaik._numpy.fk import fk
+        from jaik.kinematics.convention_conversions import dh_to_kin
+        from jaik._numpy.fk import _fk
 
         alpha = np.array([np.pi/2, 0, 0, np.pi/2, -np.pi/2, 0])
         a     = np.array([0, -0.6127, -0.57155, 0, 0, 0])
@@ -253,7 +247,7 @@ class TestSP4:
             P[:, col] -= shift
 
         q_ref = np.array([0.0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0.0])
-        R_06, p_0T = fk(q_ref, kin)
+        R_06, p_0T = _fk(q_ref, kin)
         p_06 = p_0T - P[:, 0] - R_06 @ P[:, 6]
         d1 = H[:, 1] @ P[:, 1:5].sum(axis=1)
 

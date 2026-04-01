@@ -1,46 +1,17 @@
 # tests/test_numpy_ur10e.py
 import numpy as np
 import pytest
-from jaik._numpy.convention_conversions import dh_to_kin
-from jaik._numpy.fk import fk
+from jaik.kinematics.convention_conversions import dh_to_kin
+from jaik._numpy.fk import _fk
 from jaik._numpy.ik_3p2i import ik_3_parallel_2_intersecting
+from jaik.kinematics.adjustments import adjust_kin_for_3p2i
 
 # UR10e nominal DH parameters (e-series)
 # Source: Universal Robots support articles
 # alpha [rad], a [m], d [m]
 UR10E_ALPHA = np.array([np.pi/2, 0, 0, np.pi/2, -np.pi/2, 0])
 UR10E_A     = np.array([0, -0.6127, -0.57155, 0, 0, 0])
-UR10E_D     = np.array([0.1807, 0, 0, 0.17415, 0.12, 0.1163])
-# UR10E_D     = np.array([0.1807, 0, 0, 0.17415, 0.11985, 0.11655])
-
-
-def adjust_kin_for_3p2i(kin):
-    """
-    Adjust kin so that p_12=0 and p_56=0, required by ik_3_parallel_2_intersecting.
-    Slides joint 1 origin to coincide with joint 2, and joint 5 to coincide with 6.
-    Compensates in p_01 and p_45 respectively.
-
-    This is a deliberate PoE convention choice — the IK solver is derived
-    assuming this canonical form. IK-Geo does this manually per robot.
-    """
-    kin = {k: v.copy() for k, v in kin.items()}
-    P = kin['P']
-    H = kin['H']
-
-    # Make p_12 = 0: project p_12 onto h1, absorb into p_01
-    h1 = H[:, 0]
-    shift1 = np.dot(P[:, 1], h1) * h1
-    P[:, 0] += shift1
-    P[:, 1] -= shift1
-
-    # Make p_56 = 0: project p_56 onto h5, absorb into p_45
-    h5 = H[:, 4]
-    shift5 = np.dot(P[:, 5], h5) * h5
-    P[:, 4] += shift5
-    P[:, 5] -= shift5
-
-    kin['P'] = P
-    return kin
+UR10E_D     = np.array([0.1807, 0, 0, 0.17415, 0.11985, 0.11655])
 
 
 @pytest.fixture
@@ -70,7 +41,7 @@ def test_dh_to_kin_first_axis(ur10e_kin):
 def test_fk_zero_config(ur10e_kin):
     """At q=0 the position should be within reach of a 1.3m arm."""
     q = np.zeros(6)
-    R, p = fk(q, ur10e_kin)
+    R, p = _fk(q, ur10e_kin)
     assert R.shape == (3, 3)
     assert p.shape == (3,)
     assert np.linalg.norm(p) < 1.5
@@ -82,7 +53,7 @@ def test_fk_rotation_orthogonal(ur10e_kin):
     rng = np.random.default_rng(42)
     for _ in range(20):
         q = rng.uniform(-np.pi, np.pi, 6)
-        R, _ = fk(q, ur10e_kin)
+        R, _ = _fk(q, ur10e_kin)
         np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
         np.testing.assert_allclose(np.linalg.det(R), 1.0, atol=1e-10)
 
@@ -100,8 +71,8 @@ def test_adjust_preserves_fk(ur10e_kin, ur10e_kin_adj):
     rng = np.random.default_rng(7)
     for _ in range(10):
         q = rng.uniform(-np.pi, np.pi, 6)
-        R1, p1 = fk(q, ur10e_kin)
-        R2, p2 = fk(q, ur10e_kin_adj)
+        R1, p1 = _fk(q, ur10e_kin)
+        R2, p2 = _fk(q, ur10e_kin_adj)
         np.testing.assert_allclose(R1, R2, atol=1e-10)
         np.testing.assert_allclose(p1, p2, atol=1e-10)
 
@@ -111,14 +82,14 @@ def test_adjust_preserves_fk(ur10e_kin, ur10e_kin_adj):
 def test_ik_known_config(ur10e_kin_adj):
     """A specific known joint config should round-trip exactly."""
     q_ref = np.array([0.0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0.0])
-    R_target, p_target = fk(q_ref, ur10e_kin_adj)
+    R_target, p_target = _fk(q_ref, ur10e_kin_adj)
     Q, is_LS = ik_3_parallel_2_intersecting(R_target, p_target, ur10e_kin_adj)
 
     assert Q.shape[1] > 0, "IK returned no solutions for a known config"
 
     found = False
     for i in range(Q.shape[1]):
-        R_check, p_check = fk(Q[:, i], ur10e_kin_adj)
+        R_check, p_check = _fk(Q[:, i], ur10e_kin_adj)
         if (np.allclose(R_check, R_target, atol=1e-6) and
                 np.allclose(p_check, p_target, atol=1e-6)):
             found = True
@@ -130,7 +101,7 @@ def test_ik_known_config(ur10e_kin_adj):
 def test_ik_returns_up_to_8_solutions(ur10e_kin_adj):
     """IK should return at most 8 solutions."""
     q_ref = np.array([0.1, -0.5, 1.2, -0.3, 0.8, -1.1])
-    R_target, p_target = fk(q_ref, ur10e_kin_adj)
+    R_target, p_target = _fk(q_ref, ur10e_kin_adj)
     Q, _ = ik_3_parallel_2_intersecting(R_target, p_target, ur10e_kin_adj)
     assert Q.shape[0] == 6
     assert Q.shape[1] <= 8
@@ -144,7 +115,7 @@ def test_ik_roundtrip(ur10e_kin_adj):
 
     for _ in range(n_tests):
         q_ref = rng.uniform(-np.pi, np.pi, 6)
-        R_target, p_target = fk(q_ref, ur10e_kin_adj)
+        R_target, p_target = _fk(q_ref, ur10e_kin_adj)
         Q, is_LS = ik_3_parallel_2_intersecting(R_target, p_target, ur10e_kin_adj)
 
         if Q.shape[1] == 0:
@@ -153,7 +124,7 @@ def test_ik_roundtrip(ur10e_kin_adj):
         for i in range(Q.shape[1]):
             if is_LS[:, i].any():
                 continue
-            R_check, p_check = fk(Q[:, i], ur10e_kin_adj)
+            R_check, p_check = _fk(Q[:, i], ur10e_kin_adj)
             if (np.allclose(R_check, R_target, atol=1e-6) and
                     np.allclose(p_check, p_target, atol=1e-6)):
                 n_success += 1
@@ -168,12 +139,12 @@ def test_ik_roundtrip_debug(ur10e_kin_adj):
     rng = np.random.default_rng(0)
     for trial in range(5):
         q_ref = rng.uniform(-np.pi, np.pi, 6)
-        R_target, p_target = fk(q_ref, ur10e_kin_adj)
+        R_target, p_target = _fk(q_ref, ur10e_kin_adj)
         Q, is_LS = ik_3_parallel_2_intersecting(R_target, p_target, ur10e_kin_adj)
 
         print(f"\nTrial {trial}: {Q.shape[1]} solutions")
         for i in range(Q.shape[1]):
-            R_check, p_check = fk(Q[:, i], ur10e_kin_adj)
+            R_check, p_check = _fk(Q[:, i], ur10e_kin_adj)
             p_err = np.linalg.norm(p_check - p_target)
             R_err = np.linalg.norm(R_check - R_target)
             print(f"  sol {i}: p_err={p_err:.4f} R_err={R_err:.4f} "

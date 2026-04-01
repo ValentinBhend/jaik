@@ -1,1 +1,1 @@
-# Coming soon
+from jaik.kinematics.robots import make_robot, make_robot_from_dh, available_robots

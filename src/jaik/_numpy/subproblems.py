@@ -4,21 +4,16 @@ from scipy import linalg as sci
 
 #Returns theta, is_LS
 def sp1(p1, p2, k):
-   #p2 *= 0
-   #p2 += rand.rot(k, theta) @ p1
-
    KxP = np.cross(k, p1)
    A = np.vstack((KxP, -np.cross(k, KxP)))
-
    x = np.dot(A, p2)
-   
-   #theta = atan2(x[0], x[1])
-
-   return atan2(x[0], x[1]), abs(np.linalg.norm(p1, 2) - np.linalg.norm(p2, 2)) > 1e-8 or abs(np.dot(k,p1) - np.dot(k,p2)) > 1e-8
+   theta = atan2(x[0], x[1])
+   is_LS = abs(np.linalg.norm(p1) - np.linalg.norm(p2)) > 1e-8 or abs(np.dot(k,p1) - np.dot(k,p2)) > 1e-8
+   return theta, is_LS
 
 
 #Run subproblem
-def sp2E(p0, p1, p2, k1, k2):
+def sp2E(p0, p1, p2, k1, k2): # TODO cleanup
    KxP1 = np.cross(k1, p1)
    KxP2 = np.cross(k2, p2)
    
@@ -62,131 +57,109 @@ def sp2E(p0, p1, p2, k1, k2):
    #We want sc as vector/list, so we flatten both arrays
    sc = x_ls.flatten() + xi*A_perp_tilde.flatten()
 
-   #Commented out for optimization
-   #theta1 = atan2(sc[0], sc[1])
-   #theta2 = atan2(sc[2], sc[3])
+   theta1 = atan2(sc[0], sc[1])
+   theta2 = atan2(sc[2], sc[3])
 
-   return [atan2(sc[0], sc[1]), atan2(sc[2], sc[3])]
+   return [theta1, theta2]
 
 
 
 #Code called to run subproblem
 def sp2(p1, p2, k1, k2):
    #Rescale for least-squares
-   p1/=np.linalg.norm(p1, 2)
-   p2/=np.linalg.norm(p2, 2)
+   p1_norm = p1 / np.linalg.norm(p1)
+   p2_norm = p2 / np.linalg.norm(p2)
 
-   KxP1 = np.cross(k1, p1)
-   KxP2 = np.cross(k2, p2)
+   KxP1 = np.cross(k1, p1_norm)
+   KxP2 = np.cross(k2, p2_norm)
 
    #np.block appends two arrays together
-   A1 = np.block([[KxP1], [-np.cross(k1, KxP1)]])
-   A2 = np.block([[KxP2], [-np.cross(k2, KxP2)]])
+   A1 = np.vstack((KxP1, -np.cross(k1, KxP1)))
+   A2 = np.vstack((KxP2, -np.cross(k2, KxP2)))
 
    radius_1_sq = np.dot(KxP1, KxP1)
    radius_2_sq = np.dot(KxP2, KxP2)
    
-   k1_d_p1 = np.dot(k1,p1)
-   k2_d_p2 = np.dot(k2,p2)
-   k1_d_k2 = np.dot(k1,k2)
+   k1_d_p1 = np.dot(k1, p1_norm)
+   k2_d_p2 = np.dot(k2, p2_norm)
+   k1_d_k2 = np.dot(k1, k2)
 
-   ls_frac = 1/(1-np.dot(k1_d_k2, k1_d_k2)) #Use np.dot as ^2
+   ls_frac = 1 / (1 - k1_d_k2**2)
 
-   alpha_1 = np.dot(ls_frac,(k1_d_p1-np.dot(k1_d_k2,k2_d_p2)))
-   alpha_2 = np.dot(ls_frac, (k2_d_p2-np.dot(k1_d_k2,k1_d_p1)))
+   alpha_1 = ls_frac * (k1_d_p1 - (k1_d_k2 * k2_d_p2))
+   alpha_2 = ls_frac * (k2_d_p2 - (k1_d_k2 * k1_d_p1))
 
-   x_ls_1 = alpha_2*np.dot(A1, k2) / radius_1_sq
-   x_ls_2 = alpha_1*np.dot(A2, k1) / radius_2_sq
-   x_ls =  np.block([[x_ls_1], [x_ls_2]])
+   x_ls_1 = alpha_2 * np.dot(A1, k2) / radius_1_sq
+   x_ls_2 = alpha_1 * np.dot(A2, k1) / radius_2_sq
+   x_ls = np.concatenate((x_ls_1, x_ls_2))
 
-   n_sym = np.cross(k1,k2)
-   pinv_A1 = A1/radius_1_sq
-   pinv_A2 = A2/radius_2_sq
-   A_perp_tilde = np.block([[pinv_A1], [pinv_A2]]) @ n_sym
-
-   #See if this is not a least-squares problem
-   if np.linalg.norm(x_ls[0], 2) < 1:
-      xi = sqrt(1.0 - pow(np.linalg.norm(x_ls[0], 2),2)) / np.linalg.norm(A_perp_tilde[0:2],2)
-      sc_1 = x_ls.flatten() + A_perp_tilde * xi
-      sc_2 = x_ls.flatten() - A_perp_tilde * xi
-
-      #Commented out for optimization purposes
-      #theta1 = np.block([[atan2(sc_1[0], sc_1[1])], [atan2(sc_2[0], sc_2[1])]])
-      #theta2 = np.block([[atan2(sc_1[2], sc_1[3])], [atan2(sc_2[2], sc_2[3])]])
-      return np.block([[atan2(sc_1[0], sc_1[1])], [atan2(sc_2[0], sc_2[1])]]), np.block([[atan2(sc_1[2], sc_1[3])], [atan2(sc_2[2], sc_2[3])]]), False
-
-   #Otherwise, this is least-squares
+   is_LS = np.linalg.norm(x_ls[0]) >= 1
+   if is_LS:
+      theta1 = atan2(x_ls[0], x_ls[1])
+      theta2 = atan2(x_ls[2], x_ls[3])
    else:
-      #Same as above, it is optimal to return these values vs defining variables
-      #theta1 = atan2(x_ls[0][0], x_ls[0][1])
-      #theta2 = atan2(x_ls[1][0], x_ls[1][1])
-      return atan2(x_ls[0][0], x_ls[0][1]), atan2(x_ls[1][0], x_ls[1][1]), True
+      n_sym = np.cross(k1, k2)
+      pinv_A1 = A1 / radius_1_sq
+      pinv_A2 = A2 / radius_2_sq
+      A_perp_tilde = np.vstack((pinv_A1, pinv_A2)) @ n_sym
+
+      xi = sqrt(1.0 - np.linalg.norm(x_ls[:2])**2) / np.linalg.norm(A_perp_tilde[0:2])
+      sc_1 = x_ls + A_perp_tilde * xi
+      sc_2 = x_ls - A_perp_tilde * xi
+
+      theta1 = np.array([atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])])
+      theta2 = np.array([atan2(sc_1[2], sc_1[3]), atan2(sc_2[2], sc_2[3])])
+   return theta1, theta2, is_LS
 
 
-   
-
-#Run the problem and return theta
 def sp3(p1, p2, k, d):
    KxP = np.cross(k, p1)
-   #np.concatenate stacks two arrays here: [arr1; arr2]
-   A1 = np.concatenate(([KxP], [-np.cross(k, KxP)]), axis = 0)
-   A = -2*p2@A1.T
+   A1 = np.vstack((KxP, -np.cross(k, KxP)))  # (2, 3)
+   A = -2 * p2 @ A1.T
 
    norm_A_sq = np.dot(A,A)
    norm_A = sqrt(norm_A_sq)
-   b = pow(d,2) - pow(np.linalg.norm(p2 - np.reshape(k, (3,1)) @ np.reshape(k, (1,3)) @ p1, 2), 2) - pow(np.linalg.norm(KxP, 2), 2)
+   b = d**2 - np.linalg.norm(p2 - np.dot(k, p1) * k)**2 - np.linalg.norm(KxP)**2
 
-   x_ls = A1@(-2*p2*b/norm_A_sq)
+   x_ls = A1 @ (-2 * p2 * b / norm_A_sq)
 
-   #Check to see if this is least squares version
-   if x_ls @ x_ls > 1:
-      #theta = atan2(x_ls[0], x_ls[1])
-      return atan2(x_ls[0], x_ls[1]), True
-   
-   #Otherwise not a least squares
+   is_LS = x_ls @ x_ls > 1
+   if is_LS:
+      theta = atan2(x_ls[0], x_ls[1])
    else:
-      xi = sqrt(1-pow(b, 2)/norm_A_sq)
+      xi = sqrt(1 - b**2 / norm_A_sq)
 
-      A_perp_tilde = np.block([A[1], -A[0]])
-      A_perp = A_perp_tilde/norm_A
+      A_perp_tilde = np.array([A[1], -A[0]]) # (2,)
+      A_perp = A_perp_tilde / norm_A
 
       sc_1 = x_ls + xi * A_perp
       sc_2 = x_ls - xi * A_perp
 
-      #theta = [atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])]
-      return np.array([atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])]), False
-
-
+      theta = np.array([atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])])
+   return theta, is_LS
 
 
 def sp4(p, k, h, d):
-   A11 = np.cross(k,p)
-   A1 = np.concatenate(([A11], [-np.cross(k,A11)]), axis = 0)
-   A = h @ A1.T
-
-   b = d - h @ np.reshape(k, (3, 1)) @ (k @ np.reshape(p, (3, 1)))
-   norm_A2 = A @ A
-   x_ls = A1 @ (h * b)
-
-   #If a non-least squares version
-   if norm_A2 > pow(b, 2):
-      xi = sqrt(norm_A2-pow(b, 2))
-      A_perp_tilde = np.block([A[1], -A[0]])
-      
-      sc_1 = x_ls + xi * A_perp_tilde
-      sc_2 = x_ls - xi * A_perp_tilde
-
-      #theta = [atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])]
-      return np.array([atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])]), False
-   
-   #Otherwise problem is least squares
-   else:
-      #theta = atan2(x_ls[0], x_ls[1])
-      return atan2(x_ls[0], x_ls[1]), True
+    A11 = np.cross(k, p)
+    A1 = np.vstack((A11, -np.cross(k, A11)))   # (2, 3)
+    A = h @ A1.T                                 # (2,)
+    b = d - np.dot(h, k) * np.dot(k, p)
+    norm_A2 = A @ A
+    x_ls = A1 @ (h * b)
+    is_LS = norm_A2 <= b**2
+    if is_LS:
+        theta = atan2(x_ls[0], x_ls[1])
+    else:
+        xi = sqrt(norm_A2 - b**2)
+        A_perp_tilde = np.array([A[1], -A[0]])  # (2,)
+        sc_1 = x_ls + xi * A_perp_tilde
+        sc_2 = x_ls - xi * A_perp_tilde
+        theta = np.array([atan2(sc_1[0], sc_1[1]), atan2(sc_2[0], sc_2[1])])
+    return theta, is_LS
    
 
 #Represents polynomials as coeffecient vectors
-def cone_polynomials(p0_i, k_i, p_i, p_i_s, k2):
+def cone_polynomials(p0_i, k_i, p_i, p_i_s, k2): # TODO cleanup
    #||A x + p_S - H k_2||^2 = 
    #-H^2 + P(H) +- sqrt(R(H))
    #Reperesent polynomials P_i, R_i as coefficient vectors
@@ -210,7 +183,7 @@ def cone_polynomials(p0_i, k_i, p_i, p_i_s, k2):
 
 
 #Run subproblem
-def sp5(p0, p1, p2, p3, k1, k2, k3):
+def sp5(p0, p1, p2, p3, k1, k2, k3): # TODO cleanup
    i_soln = 0
 
    p1_s = p0 + np.reshape(k1, (3, 1)) @ np.reshape(k1, (1, 3)) @ p1
@@ -279,7 +252,7 @@ def sp5(p0, p1, p2, p3, k1, k2, k3):
    return theta1, theta2, theta3
 
 
-def solve_2_ellipse_numeric(xm1, xn1, xm2, xn2):
+def solve_2_ellipse_numeric(xm1, xn1, xm2, xn2): # TODO cleanup
    A_1 = np.transpose(xn1)@xn1
    a = A_1[0][0]
    b = 2*A_1[1][0]
@@ -316,7 +289,7 @@ def solve_2_ellipse_numeric(xm1, xn1, xm2, xn2):
 
    return x, y #This could just return the calculations of x,y for optimization purposes
 
-def sp6(H, K, P, d1, d2):
+def sp6(H, K, P, d1, d2): # TODO cleanup
    k1Xp1 = np.cross(K[0], P[0])
    k1Xp2 = np.cross(K[1], P[1])
    k1Xp3 = np.cross(K[2], P[2])

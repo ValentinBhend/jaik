@@ -1,5 +1,5 @@
 import numpy as np
-from .utils import _rot
+from jaik._numpy.utils import _rot
 
 def dh_to_kin(alpha_vec, a_vec, d_vec):
     """
