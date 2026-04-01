@@ -11,3 +11,7 @@ requires-python = ">=3.8"
 authors = [
   { name = "Valentin Bhend", email = "bhed@zhaw.ch" }
 ]
+
+[project.urls]
+Homepage = "https://github.com/ValentinBhend/jaik"
+Repository = "https://github.com/ValentinBhend/jaik"
