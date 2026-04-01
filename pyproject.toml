@@ -13,5 +13,4 @@ authors = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ValentinBhend/jaik"
 Repository = "https://github.com/ValentinBhend/jaik"
