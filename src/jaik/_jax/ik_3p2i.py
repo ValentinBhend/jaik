@@ -12,9 +12,50 @@ def _wrap_to_pi(
 ) -> Float[Array, ""]:
     return (angle + jnp.pi) % (2 * jnp.pi) - jnp.pi
 
+def ik_3_parallel_2_intersecting(
+    R_06: Float[Array, "3 3"],
+    p_0T: Float[Array, "3"],
+    H:    Float[Array, "3 6"],
+    P:    Float[Array, "3 7"],
+) -> tuple[Float[Array, "6 8"], Bool[Array, "6 8"]]:
+    p_06 = p_0T - P[:, 0] - R_06 @ P[:, 6]
+    d1   = H[:, 1] @ P[:, 1:5].sum(axis=1)
+    t1   = sp4(p_06, -H[:, 0], H[:, 1], d1)   # (2,)
+
+    def _branch(q_1, q_5_idx, q_3_idx):
+        R_01     = _rot(H[:, 0], q_1)
+        d5       = H[:, 1] @ R_01.T @ R_06 @ H[:, 5]
+        t5       = sp4(H[:, 5], H[:, 4], H[:, 1], d5)     # (2,)
+        q_5      = t5[q_5_idx]
+        R_45     = _rot(H[:, 4], q_5)
+        theta_14 = sp1(R_45 @ H[:, 5], R_01.T @ R_06 @ H[:, 5], H[:, 1])
+        q_6      = sp1(R_45.T @ H[:, 1], R_06.T @ R_01 @ H[:, 1], -H[:, 5])
+        d_inner  = R_01.T @ p_06 - P[:, 1] - _rot(H[:, 1], theta_14) @ P[:, 4]
+        t3       = sp3(-P[:, 3], P[:, 2], H[:, 1], jnp.linalg.norm(d_inner))  # (2,)
+        q_3      = t3[q_3_idx]
+        q_2      = sp1(P[:, 2] + _rot(H[:, 1], q_3) @ P[:, 3], d_inner, H[:, 1])
+        q_4      = _wrap_to_pi(theta_14 - q_2 - q_3)
+        return jnp.array([q_1, q_2, q_3, q_4, q_5, q_6])
+
+    # all 8 branches explicitly — (q1_idx, q5_idx, q3_idx)
+    branches = [
+        (t1[0], 0, 0),
+        (t1[0], 0, 1),
+        (t1[0], 1, 0),
+        (t1[0], 1, 1),
+        (t1[1], 0, 0),
+        (t1[1], 0, 1),
+        (t1[1], 1, 0),
+        (t1[1], 1, 1),
+    ]
+
+    Q = jnp.stack([_branch(q_1, i5, i3) for q_1, i5, i3 in branches], axis=1)
+    valid = ~jnp.isnan(Q).any(axis=0)
+    return Q, valid
+
 
 # @jaxtyped(typechecker=beartype)
-def ik_3_parallel_2_intersecting(
+def ik_3_parallel_2_intersecting_nested(
     R_06: Float[Array, "3 3"],
     p_0T: Float[Array, "3"],
     H:    Float[Array, "3 6"],
