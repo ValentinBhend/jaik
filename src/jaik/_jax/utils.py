@@ -4,7 +4,7 @@ from jaxtyping import Float, Array, jaxtyped
 from beartype import beartype
 
 
-@jaxtyped(typechecker=beartype)
+# @jaxtyped(typechecker=beartype)
 def _rot(
     k: Float[Array, "3"],
     theta: Float[Array, ""],

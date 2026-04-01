@@ -157,9 +157,7 @@ def bench_jax_scan():
     @jax.jit
     def scan_ik(Rs, ps):
         def step(_, Rp):
-            R, p = Rp
-            Q, valid = ik_jax(R, p)
-            return None, (Q, valid)
+            return None, ik_jax(*Rp)
         _, out = jax.lax.scan(step, None, (Rs, ps))
         return out
 

@@ -176,7 +176,7 @@ def _build_callables(alpha, a, d, R_6T, backend, family):
         return _make_numpy_callables(kin, family)
 
 
-def _make_jax_callables(kin, family):
+def _make_jax_callables_slow(kin, family):
     import jax.numpy as jnp
     from jaik._jax.fk import _fk as _fk_jax
 
@@ -199,6 +199,31 @@ def _make_jax_callables(kin, family):
 
     return fk, ik
 
+def _make_jax_callables(kin, family):
+    import jax.numpy as jnp
+    from jaik._jax.fk import _fk as _fk_jax
+    from jaik._jax.ik_3p2i import ik_3_parallel_2_intersecting as _solver
+
+    H  = jnp.asarray(kin['H'])
+    P  = jnp.asarray(kin['P'])
+    RT = jnp.asarray(kin['RT'])
+
+    def fk(q):
+        R, p = _fk_jax(q, H, P)
+        return R @ RT, p
+
+    def ik(R_target, p_target):
+        """
+        Returns (Q, valid_mask):
+            Q:          (6, 8) joint angles, NaN for infeasible branches
+            valid_mask: (8,) bool, True where branch is geometrically valid
+        """
+        R_06 = R_target @ RT.T
+        Q, _ = _solver(R_06, p_target, H, P)
+        valid_mask = ~jnp.isnan(Q).any(axis=0)   # (8,)
+        return Q, valid_mask
+
+    return fk, ik
 
 def _make_numpy_callables(kin, family):
     from jaik._numpy.fk import _fk as _fk_np
