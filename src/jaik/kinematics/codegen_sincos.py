@@ -38,14 +38,9 @@ from jaik.kinematics.robots import make_robot, _UR_PARAMS, _UR_R6T
 
 # ── sympy helpers ─────────────────────────────────────────────────────────────
 
-def _rat(x):
-    """Convert float to sympy Float — keeps reasonable precision without huge rationals."""
-    return sp.Float(x)
-
-
 def _vec(arr):
     """numpy 3-vector → sympy Matrix column, entries as rationals."""
-    return sp.Matrix([_rat(arr[i]) for i in range(3)])
+    return sp.Matrix([sp.Float(arr[i]) for i in range(3)])
 
 
 def _clean_hp(arr, tol=1e-10):
@@ -60,11 +55,11 @@ def _clean_hp(arr, tol=1e-10):
     result[np.abs(result + 1.0) < tol] = -1.0
     return result
 
-def _sym_rot(k_vec, theta):
+def _sym_rot(k_vec, s_theta, c_theta):
     """Rodrigues rotation: k_vec is sympy column vector, theta is sympy expr."""
     kx, ky, kz = k_vec
-    c = sp.cos(theta)
-    s = sp.sin(theta)
+    c = c_theta
+    s = s_theta
     t = 1 - c
     return sp.Matrix([
         [t*kx*kx + c,    t*kx*ky - s*kz, t*kx*kz + s*ky],
@@ -73,59 +68,193 @@ def _sym_rot(k_vec, theta):
     ])
 
 
-def _sp1(p1, p2, k):
-    """Direct translation of JAX sp1."""
+# def _sp1_sincos(p1, p2, k):
+#     """
+#     Returns (sin_theta, cos_theta) instead of atan2.
+#     Eliminates transcendental calls in the hot path.
+#     """
+#     # KxP is the basis vector for the sine component
+#     KxP = k.cross(p1)
+    
+#     # y is the sine component, x is the cosine component
+#     y = KxP.dot(p2)
+#     x = (-k.cross(KxP)).dot(p2) # TODO should be the same, but check by replacing: x = (p1 - k * k.dot(p1)).dot(p2)
+    
+#     # Normalization factor
+#     # In JAX, we'll want to ensure this isn't zero to avoid NaN
+#     mag = sp.sqrt(y**2 + x**2)
+    
+#     return y / mag, x / mag
+
+# def _sp1_sincos(p1, p2, k):
+#     # 1. Project p1 and p2 into the plane perpendicular to k
+#     # This is critical for UR robots where axes are often offset
+#     p1_p = p1 - k * k.dot(p1)
+#     p2_p = p2 - k * k.dot(p2)
+    
+#     # 2. Define the orthonormal basis for the plane
+#     # u is the 0-angle direction (cosine axis)
+#     # v is the 90-degree direction (sine axis)
+#     u = p1_p
+#     v = k.cross(u)
+    
+#     # 3. Sine is projection on v, Cosine is projection on u
+#     # Note: we need the dot product of p2_p with these basis vectors
+#     # But since u and v aren't unit, we normalize at the end anyway
+#     y = p2_p.dot(v)
+#     x = p2_p.dot(u)
+    
+#     mag = sp.sqrt(y**2 + x**2)
+#     return y / mag, x / mag
+
+def _sp1_sincos(p1, p2, k):
+    """
+    Subproblem 1: Find rotation about axis k that takes p1 to p2.
+    Matches Rodrigues: R(k, theta) * p1 = p2
+    """
+    # 1. Ensure projections are perpendicular to the axis
+    p1_p = p1 - k * k.dot(p1)
+    p2_p = p2 - k * k.dot(p2)
+    
+    # 2. Basis vectors
+    # u (cosine axis) is the direction of p1_p
+    # v (sine axis) must be k cross u to follow right-hand rule
+    u = p1_p
+    v = k.cross(u)
+    
+    # 3. Component projections
+    # p2_p = cos(theta)*u + sin(theta)*v
+    y = p2_p.dot(v)
+    x = p2_p.dot(u)
+    
+    mag = sp.sqrt(y**2 + x**2)
+    return y / mag, x / mag
+
+
+def _sp3_sincos(p1, p2, k, d):
+    """Mechanical translation of SP3 to Sincos."""
     KxP = k.cross(p1)
-    x0  = KxP.dot(p2)
-    x1  = (-k.cross(KxP)).dot(p2)
-    return sp.atan2(x0, x1)
-
-
-def _sp3(p1, p2, k, d):
-    """Direct translation of JAX sp3 — no branching, NaN propagates."""
-    KxP      = k.cross(p1)
-    A1_r0    = KxP
-    A1_r1    = -k.cross(KxP)
-    A0       = -2 * p2.dot(A1_r0)
-    A1v      = -2 * p2.dot(A1_r1)
+    A1_r0 = KxP
+    A1_r1 = -k.cross(KxP)
+    
+    A0 = -2 * p2.dot(A1_r0)
+    A1v = -2 * p2.dot(A1_r1)
     norm_A_sq = A0**2 + A1v**2
-    norm_A   = sp.sqrt(norm_A_sq)
-    # avoid .norm()**2 — compute squared norms via .dot() to stay polynomial
-    p2_proj  = p2 - k * k.dot(p1)
+    norm_A = sp.sqrt(norm_A_sq)
+    
+    p2_proj = p2 - k * k.dot(p1)
     p2_proj_sq = p2_proj.dot(p2_proj)
-    KxP_sq   = KxP.dot(KxP)
-    b        = d**2 - p2_proj_sq - KxP_sq
-    x_ls0    = A1_r0.dot(-2 * p2) * b / norm_A_sq
-    x_ls1    = A1_r1.dot(-2 * p2) * b / norm_A_sq
-    # xi       = sp.sqrt(1 - b**2 / norm_A_sq)
+    KxP_sq = KxP.dot(KxP)
+    
+    b = d**2 - p2_proj_sq - KxP_sq
+    
+    # Least squares components
+    x_ls0 = A1_r0.dot(-2 * p2) * b / norm_A_sq
+    x_ls1 = A1_r1.dot(-2 * p2) * b / norm_A_sq
+    
+    # Discriminant for the two solutions
     xi = sp.sqrt(sp.expand(1 - b**2 / norm_A_sq))
-    A_perp0  = A1v / norm_A
-    A_perp1  = -A0 / norm_A
-    sc1 = sp.Matrix([x_ls0 + xi * A_perp0, x_ls1 + xi * A_perp1])
-    sc2 = sp.Matrix([x_ls0 - xi * A_perp0, x_ls1 - xi * A_perp1])
-    return sp.atan2(sc1[0], sc1[1]), sp.atan2(sc2[0], sc2[1])
+    
+    A_perp0 = A1v / norm_A
+    A_perp1 = -A0 / norm_A
+    
+    # Raw sine and cosine components
+    s1_raw, c1_raw = x_ls0 + xi * A_perp0, x_ls1 + xi * A_perp1
+    s2_raw, c2_raw = x_ls0 - xi * A_perp0, x_ls1 - xi * A_perp1
+    
+    # Normalize to ensure unit vectors (sin^2 + cos^2 = 1)
+    mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
+    mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
+    
+    return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
 
 
-def _sp4(p, k, h, d):
-    """Direct translation of JAX sp4 — no branching, NaN propagates."""
-    A11       = k.cross(p)
-    A1_r0     = A11
-    A1_r1     = -k.cross(A11)
-    # A = h @ A1.T  →  (2,)
-    A0        = h.dot(A1_r0)
-    A1v       = h.dot(A1_r1)
-    b         = d - h.dot(k) * k.dot(p)
-    norm_A2   = A0**2 + A1v**2
-    # x_ls = A1 @ (h * b)
-    x_ls0     = A1_r0.dot(h) * b
-    x_ls1     = A1_r1.dot(h) * b
-    # xi        = sp.sqrt(norm_A2 - b**2)
+# def _sp4_sincos(p, k, h, d):
+#     """Mechanical translation of SP4 to Sincos."""
+#     A11 = k.cross(p)
+#     A1_r0 = A11
+#     A1_r1 = -k.cross(A11)
+    
+#     A0 = h.dot(A1_r0)
+#     A1v = h.dot(A1_r1)
+#     b = d - h.dot(k) * k.dot(p)
+#     norm_A2 = A0**2 + A1v**2
+    
+#     x_ls0 = A1_r0.dot(h) * b
+#     x_ls1 = A1_r1.dot(h) * b
+    
+#     xi = sp.sqrt(sp.expand(norm_A2 - b**2))
+    
+#     # Raw sine and cosine components
+#     # Note: division by norm_A2 is built into the ls components 
+#     # but we normalize explicitly at the end anyway.
+#     s1_raw, c1_raw = (x_ls0 + xi * A1v) / norm_A2, (x_ls1 + xi * (-A0)) / norm_A2
+#     s2_raw, c2_raw = (x_ls0 - xi * A1v) / norm_A2, (x_ls1 - xi * (-A0)) / norm_A2
+    
+#     mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
+#     mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
+    
+#     return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
+
+# def _sp4_sincos(p, k, h, d):
+#     A11 = k.cross(p)
+#     A1_r0 = A11
+#     A1_r1 = -k.cross(A11)
+    
+#     A0 = h.dot(A1_r0)
+#     A1v = h.dot(A1_r1)
+#     b = d - h.dot(k) * k.dot(p)
+#     norm_A2 = A0**2 + A1v**2
+    
+#     # Do NOT divide by norm_A2 yet. 
+#     # Just replicate the sc1/sc2 logic from your old code.
+#     x_ls0 = A1_r0.dot(h) * b
+#     x_ls1 = A1_r1.dot(h) * b
+    
+#     xi = sp.sqrt(sp.expand(norm_A2 - b**2))
+    
+#     # These match your old sc1/sc2 Matrix entries exactly
+#     s1_raw, c1_raw = x_ls0 + xi * A1v, x_ls1 + xi * (-A0)
+#     s2_raw, c2_raw = x_ls0 - xi * A1v, x_ls1 - xi * (-A0)
+    
+#     mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
+#     mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
+    
+#     return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
+
+def _sp4_sincos(p, k, h, d):
+    """
+    Subproblem 4: Find rotation about axis k such that h.dot(R*p) = d
+    Matches the sc1/sc2 logic from the working atan2 version.
+    """
+    A11 = k.cross(p)
+    A1_r0 = A11          # This is the 'sine' direction basis
+    A1_r1 = -k.cross(A11) # This is the 'cosine' direction basis
+    
+    A0 = h.dot(A1_r0)
+    A1v = h.dot(A1_r1)
+    b = d - h.dot(k) * k.dot(p)
+    norm_A2 = A0**2 + A1v**2
+    
+    # These represent the 'Least Squares' center point in the (s, c) plane
+    x_ls0 = A0 * b
+    x_ls1 = A1v * b
+    
+    # xi is the 'distance' from the LS center to the valid circle intersections
     xi = sp.sqrt(sp.expand(norm_A2 - b**2))
-    # A_perp_tilde = [A[1], -A[0]]
-    sc1 = sp.Matrix([x_ls0 + xi * A1v,  x_ls1 + xi * (-A0)])
-    sc2 = sp.Matrix([x_ls0 - xi * A1v,  x_ls1 - xi * (-A0)])
-    return sp.atan2(sc1[0], sc1[1]), sp.atan2(sc2[0], sc2[1])
-
+    
+    # Combine to get two solutions for (sin, cos)
+    # Solution 1
+    s1_raw = x_ls0 + xi * A1v
+    c1_raw = x_ls1 - xi * A0
+    # Solution 2
+    s2_raw = x_ls0 - xi * A1v
+    c2_raw = x_ls1 + xi * A0
+    
+    mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
+    mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
+    
+    return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
 
 def _derive_global(H_num, P_num):
     """
@@ -148,38 +277,41 @@ def _derive_global(H_num, P_num):
     # ── q1 ────────────────────────────────────────────────────────────────────
     p_06 = p_0T - P[0] - R_06 * P[6]
     d1   = H[1].dot(P[1] + P[2] + P[3] + P[4])
-    t1_0_expr, t1_1_expr = _sp4(p_06, -H[0], H[1], d1)
-    t1_0, t1_1 = sp.symbols('t1_0 t1_1')
-    raw += [(t1_0, t1_0_expr), (t1_1, t1_1_expr)]
+    (s_t1_0_expr, c_t1_0_expr), (s_t1_1_expr, c_t1_1_expr) = _sp4_sincos(p_06, -H[0], H[1], d1)
+    s_t1_0, c_t1_0, s_t1_1, c_t1_1 = sp.symbols('s_t1_0 c_t1_0 s_t1_1 c_t1_1')
+    raw += [(s_t1_0, s_t1_0_expr), (c_t1_0, c_t1_0_expr), (s_t1_1, s_t1_1_expr), (c_t1_1, c_t1_1_expr)]
 
     # ── q5 per q1 branch ──────────────────────────────────────────────────────
     t5_syms = []
-    for i_q1, t1 in enumerate([t1_0, t1_1]):
-        R_01    = _sym_rot(H[0], t1)               # cos(t1)/sin(t1) as atoms
+    for i_q1, (s_t1, c_t1) in enumerate([(s_t1_0, c_t1_0), (s_t1_1, c_t1_1)]):
+        R_01    = _sym_rot(H[0], s_t1, c_t1)               # cos(t1)/sin(t1) as atoms
         d5_expr = H[1].dot(R_01.T * R_06 * H[5])
-        t5_0_expr, t5_1_expr = _sp4(H[5], H[4], H[1], d5_expr)
-        t5_0 = sp.Symbol(f't5_0_q1{i_q1}')
-        t5_1 = sp.Symbol(f't5_1_q1{i_q1}')
-        t5_syms.append((t5_0, t5_1))
-        raw += [(t5_0, t5_0_expr), (t5_1, t5_1_expr)]
+        (s_t5_0_expr, c_t5_0_expr), (s_t5_1_expr, c_t5_1_expr) = _sp4_sincos(H[5], H[4], H[1], d5_expr)
+        s_t5_0 = sp.Symbol(f's_t5_0_q1{i_q1}')
+        c_t5_0 = sp.Symbol(f'c_t5_0_q1{i_q1}')
+        s_t5_1 = sp.Symbol(f's_t5_1_q1{i_q1}')
+        c_t5_1 = sp.Symbol(f'c_t5_1_q1{i_q1}')
+        t5_syms.append(((s_t5_0, c_t5_0), (s_t5_1, c_t5_1)))
+        raw += [(s_t5_0, s_t5_0_expr), (c_t5_0, c_t5_0_expr), (s_t5_1, s_t5_1_expr), (c_t5_1, c_t5_1_expr)]
 
     # ── th14, q6, d_inner, d3 ────────────────────────────────────────────────
     # Key: R_01.T @ R_06 @ H[5] is shared between th14 and the q5=0,q5=1
     # branches for the same q1 — global CSE will factor it out automatically.
     mid_syms = {}
-    for i_q1, t1 in enumerate([t1_0, t1_1]):
-        R_01 = _sym_rot(H[0], t1)
-        for i_q5, t5 in enumerate(t5_syms[i_q1]):
-            R_45 = _sym_rot(H[4], t5)
-
-            th14_expr = _sp1(R_45 * H[5],   R_01.T * R_06 * H[5], H[1])
-            q6_expr   = _sp1(R_45.T * H[1], R_06.T * R_01 * H[1], -H[5])
-            th14 = sp.Symbol(f'th14_q1{i_q1}_q5{i_q5}')
-            q6   = sp.Symbol(f'q6_q1{i_q1}_q5{i_q5}')
-            raw += [(th14, th14_expr), (q6, q6_expr)]
+    for i_q1, (s_t1, c_t1) in enumerate([(s_t1_0, c_t1_0), (s_t1_1, c_t1_1)]):
+        R_01 = _sym_rot(H[0], s_t1, c_t1)
+        for i_q5, (s_t5, c_t5) in enumerate(t5_syms[i_q1]):
+            R_45 = _sym_rot(H[4], s_t5, c_t5)
+            s_th14_expr, c_th14_expr = _sp1_sincos(R_45 * H[5],   R_01.T * R_06 * H[5], H[1])
+            s_q6_expr, c_q6_expr   = _sp1_sincos(R_45.T * H[1], R_06.T * R_01 * H[1], -H[5])
+            s_th14 = sp.Symbol(f's_th14_q1{i_q1}_q5{i_q5}')
+            c_th14 = sp.Symbol(f'c_th14_q1{i_q1}_q5{i_q5}')
+            s_q6   = sp.Symbol(f's_q6_q1{i_q1}_q5{i_q5}')
+            c_q6   = sp.Symbol(f'c_q6_q1{i_q1}_q5{i_q5}')
+            raw += [(s_th14, s_th14_expr), (c_th14, c_th14_expr), (s_q6, s_q6_expr), (c_q6, c_q6_expr)]
 
             # d_inner uses th14 as atom — no blowup
-            d_inner = R_01.T * p_06 - P[1] - _sym_rot(H[1], th14) * P[4]
+            d_inner = R_01.T * p_06 - P[1] - _sym_rot(H[1], s_th14, c_th14) * P[4]
             di0 = sp.Symbol(f'di0_q1{i_q1}_q5{i_q5}')
             di1 = sp.Symbol(f'di1_q1{i_q1}_q5{i_q5}')
             di2 = sp.Symbol(f'di2_q1{i_q1}_q5{i_q5}')
@@ -187,7 +319,7 @@ def _derive_global(H_num, P_num):
             d3_expr = sp.sqrt(d_inner[0]**2 + d_inner[1]**2 + d_inner[2]**2)
             raw += [(di0, d_inner[0]), (di1, d_inner[1]),
                     (di2, d_inner[2]), (d3, d3_expr)]
-            mid_syms[(i_q1, i_q5)] = (th14, q6, di0, di1, di2, d3)
+            mid_syms[(i_q1, i_q5)] = ((s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, d3)
 
     # ── q3 ────────────────────────────────────────────────────────────────────
     # _sp3 args are all rational + the d3 atom → polynomial in d3 after expand
@@ -195,25 +327,38 @@ def _derive_global(H_num, P_num):
     for i_q1 in range(2):
         for i_q5 in range(2):
             *_, d3 = mid_syms[(i_q1, i_q5)]
-            t3_0_expr, t3_1_expr = _sp3(-P[3], P[2], H[1], d3)
-            t3_0 = sp.Symbol(f't3_0_q1{i_q1}_q5{i_q5}')
-            t3_1 = sp.Symbol(f't3_1_q1{i_q1}_q5{i_q5}')
-            t3_syms[(i_q1, i_q5)] = (t3_0, t3_1)
-            raw += [(t3_0, t3_0_expr), (t3_1, t3_1_expr)]
+            (s_t3_0_expr, c_t3_0_expr), (s_t3_1_expr, c_t3_1_expr) = _sp3_sincos(-P[3], P[2], H[1], d3)
+            s_t3_0 = sp.Symbol(f's_t3_0_q1{i_q1}_q5{i_q5}')
+            c_t3_0 = sp.Symbol(f'c_t3_0_q1{i_q1}_q5{i_q5}')
+            s_t3_1 = sp.Symbol(f's_t3_1_q1{i_q1}_q5{i_q5}')
+            c_t3_1 = sp.Symbol(f'c_t3_1_q1{i_q1}_q5{i_q5}')
+            t3_syms[(i_q1, i_q5)] = ((s_t3_0, c_t3_0), (s_t3_1, c_t3_1))
+            raw += [(s_t3_0, s_t3_0_expr), (c_t3_0, c_t3_0_expr), (s_t3_1, s_t3_1_expr), (c_t3_1, c_t3_1_expr)]
 
     # ── q2, q4 per branch ─────────────────────────────────────────────────────
     branch_joints = []
-    for i_q1, t1 in enumerate([t1_0, t1_1]):
-        for i_q5, t5 in enumerate(t5_syms[i_q1]):
-            th14, q6, di0, di1, di2, _ = mid_syms[(i_q1, i_q5)]
+    for i_q1, (s_t1, c_t1) in enumerate([(s_t1_0, c_t1_0), (s_t1_1, c_t1_1)]):
+        for i_q5, (s_t5, c_t5) in enumerate(t5_syms[i_q1]):
+            (s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, _ = mid_syms[(i_q1, i_q5)] #############################################
             d_inner_sym = sp.Matrix([di0, di1, di2])
-            for i_q3, t3 in enumerate(t3_syms[(i_q1, i_q5)]):
-                q2_expr = _sp1(P[2] + _sym_rot(H[1], t3) * P[3], d_inner_sym, H[1])
-                q4_expr = th14 - q2_expr - t3
-                q2 = sp.Symbol(f'q2_b{i_q1}{i_q5}{i_q3}')
-                q4 = sp.Symbol(f'q4_b{i_q1}{i_q5}{i_q3}')
-                raw += [(q2, q2_expr), (q4, q4_expr)]
-                branch_joints.append((t1, q2, t3, q4, t5, q6))
+            for i_q3, (s_t3, c_t3) in enumerate(t3_syms[(i_q1, i_q5)]):
+                s_q2_expr, c_q2_expr = _sp1_sincos(P[2] + _sym_rot(H[1], s_t3, c_t3) * P[3], d_inner_sym, H[1])
+
+                # s_q4_expr = s_th14 - s_q2_expr - s_t3
+                # c_q4_expr = c_th14 - c_q2_expr - c_t3
+                # First find sin/cos of (th14 - q2)
+                s_14_2 = s_th14 * c_q2_expr - c_th14 * s_q2_expr
+                c_14_2 = c_th14 * c_q2_expr + s_th14 * s_q2_expr
+                # Then find sin/cos of ((th14 - q2) - q3)
+                s_q4_expr = s_14_2 * c_t3 - c_14_2 * s_t3
+                c_q4_expr = c_14_2 * c_t3 + s_14_2 * s_t3
+
+                s_q2 = sp.Symbol(f's_q2_b{i_q1}{i_q5}{i_q3}')
+                c_q2 = sp.Symbol(f'c_q2_b{i_q1}{i_q5}{i_q3}')
+                s_q4 = sp.Symbol(f's_q4_b{i_q1}{i_q5}{i_q3}')
+                c_q4 = sp.Symbol(f'c_q4_b{i_q1}{i_q5}{i_q3}')
+                raw += [(s_q2, s_q2_expr), (c_q2, c_q2_expr), (s_q4, s_q4_expr), (c_q4, c_q4_expr)]
+                branch_joints.append((s_t1, c_t1, s_q2, c_q2, s_t3, c_t3, s_q4, c_q4, s_t5, c_t5, s_q6, c_q6))
 
     # ── ONE global CSE pass ───────────────────────────────────────────────────
     all_syms  = [s for s, _ in raw]
@@ -236,9 +381,11 @@ class _JnpPrinter(PythonCodePrinter):
         b, e = expr.args
         if e == sp.Rational(1, 2):
             return f"jnp.sqrt({self._print(b)})"
+        if e == sp.Rational(-1, 2) or e == -0.5:
+            return f"(1.0 / jnp.sqrt({self._print(b)}))"
         if e == -1:
             return f"(1.0 / ({self._print(b)}))"
-        return f"({self._print(b)} ** {self._print(e)})"
+        return f"(({self._print(b)}) ** {self._print(e)})" # Wrap the base in its own parentheses!
     def _print_atan2(self, expr):
         return f"jnp.arctan2({self._print(expr.args[0])}, {self._print(expr.args[1])})"
     def _print_acos(self, expr):
@@ -251,7 +398,6 @@ class _JnpPrinter(PythonCodePrinter):
         return repr(int(expr))
     def _print_Rational(self, expr):
         return repr(float(expr))
-
 
 def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
                branch_joints, out_path):
@@ -272,9 +418,9 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
         f'def ik_{robot_name.lower()}(',
         '    R_06: Float[Array, "3 3"],',
         '    p_0T: Float[Array, "3"],',
-        ') -> tuple[Float[Array, "6 8"], Bool[Array, "8"]]:',
+        ') -> tuple[Float[Array, "12 8"], Bool[Array, "8"]]:',
         f'    """CSE-generated IK for {robot_name} (3p2i).',
-        f'    Returns (Q, valid): Q is (6,8), valid is (8,) bool.',
+        f'    Returns (Q, valid): Q is (12,8), valid is (8,) bool.',
         f'    NaN entries mark infeasible branches."""',
         '',
     ]
@@ -343,7 +489,7 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
         '',
         '    Q = jnp.stack([',
         *[f'        _b{b},' for b in range(8)],
-        '    ], axis=1)  # (6, 8)',
+        '    ], axis=1)  # (12, 8)',
         '',
         '    valid = ~jnp.isnan(Q).any(axis=0)',
         '    return Q, valid',
@@ -362,7 +508,7 @@ def _validate(robot_name, out_path, n_tests=100):
 
     fk_gen, ik_gen = make_robot(robot_name, solver="general")
 
-    mod_name = f"jaik._jax._generated.ik_{robot_name.lower()}"
+    mod_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     mod = importlib.import_module(mod_name)
@@ -383,10 +529,14 @@ def _validate(robot_name, out_path, n_tests=100):
         R_tcp, p_tcp = fk_gen(q)
         R_06 = R_tcp @ RT.T
 
-        Q_cse, valid_cse = ik_cse(R_06, p_tcp)
+        sc_Q_cse, valid_cse = ik_cse(R_06, p_tcp)
         Q_gen, valid_gen = ik_gen(R_tcp, p_tcp)
 
-        Q_cse_np    = np.asarray(Q_cse)
+        sc_Q_cse_np    = np.asarray(sc_Q_cse)
+        sines = sc_Q_cse_np[0::2, :]
+        cosines = sc_Q_cse_np[1::2, :]
+        Q_cse_np = np.arctan2(sines, cosines)
+
         valid_cse_np = np.asarray(valid_cse)
         Q_gen_np    = np.asarray(Q_gen)
         valid_gen_np = np.asarray(valid_gen)
@@ -471,7 +621,7 @@ def generate(robot_name, out_dir=None):
     H_num = _clean_hp(kin['H'])   # ← clean before symbolic derivation
     P_num = _clean_hp(kin['P'])   # ← clean before symbolic derivation
 
-    out_path = out_dir / f"ik_{robot_name.lower()}.py"
+    out_path = out_dir / f"ik_{robot_name.lower()}_sincos.py"
 
     print(f"\n=== Generating CSE IK for {robot_name} ===")
     # print(f"  H[:,0] = {H_num[:,0]}  (should be [0,0,1])")

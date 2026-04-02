@@ -127,103 +127,145 @@ def _sp4(p, k, h, d):
     return sp.atan2(sc1[0], sc1[1]), sp.atan2(sc2[0], sc2[1])
 
 
-def _derive_global(H_num, P_num):
-    """
-    Collect all raw (sym, expr) pairs in dependency order,
-    then run ONE global sp.cse.  Boundary symbols (t1_*, t5_*, th14_*,
-    d3_*, t3_*) remain explicit atoms that prevent expression blow-up
-    while enabling cross-stage CSE to factor sin/cos(t1_0) etc. once.
-    """
-    H = [_vec(H_num[:, j]) for j in range(6)]
-    P = [_vec(P_num[:, j]) for j in range(7)]
+# ── staged derivation ─────────────────────────────────────────────────────────
 
+def _derive_staged(H_num, P_num):
+    """
+    Derive 3p2i IK symbolically in stages, introducing fresh intermediate
+    symbols at each branch boundary to prevent expression blowup.
+
+    Returns a list of (stage_name, input_syms, replacements, reduced_exprs,
+                       output_sym_names, output_exprs)
+    which are emitted sequentially into the generated file.
+    """
+    # convert H and P to exact rational sympy matrices
+    H = [_vec(H_num[:, j]) for j in range(6)]   # H[:,j]
+    P = [_vec(P_num[:, j]) for j in range(7)]   # P[:,j]
+
+    # ── input symbols ─────────────────────────────────────────────────────────
     R_syms = [[sp.Symbol(f'r{i+1}{j+1}') for j in range(3)] for i in range(3)]
     p_syms = [sp.Symbol(f'p{i+1}') for i in range(3)]
     R_06   = sp.Matrix(R_syms)
     p_0T   = sp.Matrix(p_syms)
     input_syms = [R_syms[i][j] for i in range(3) for j in range(3)] + p_syms
 
-    raw = []  # (output_sym, raw_sympy_expr) in strict dependency order
+    stages = []
 
-    # ── q1 ────────────────────────────────────────────────────────────────────
+    # ── stage 1: p_06, d1, SP4 → t1_0, t1_1 ─────────────────────────────────
     p_06 = p_0T - P[0] - R_06 * P[6]
-    d1   = H[1].dot(P[1] + P[2] + P[3] + P[4])
+    d1   = H[1].dot(P[1] + P[2] + P[3] + P[4])  # H[:,1]·sum(P[:,1:5])
     t1_0_expr, t1_1_expr = _sp4(p_06, -H[0], H[1], d1)
-    t1_0, t1_1 = sp.symbols('t1_0 t1_1')
-    raw += [(t1_0, t1_0_expr), (t1_1, t1_1_expr)]
 
-    # ── q5 per q1 branch ──────────────────────────────────────────────────────
+    t1_0, t1_1 = sp.symbols('t1_0 t1_1')
+    stage1_exprs   = [t1_0_expr, t1_1_expr]
+    stage1_outputs = [t1_0, t1_1]
+    # stage1_exprs   = [] ############### TODO why doesnt this work?
+    # stage1_outputs = []
+    # t1_0 = t1_0_expr
+    # t1_1 = t1_1_expr
+    repl, red = sp.cse(stage1_exprs, optimizations='basic')
+    stages.append(('stage1_q1', input_syms, repl, red, stage1_outputs))
+
+    # ── stage 2: for each q1 branch, R_01, d5, SP4 → t5 ─────────────────────
     t5_syms = []
     for i_q1, t1 in enumerate([t1_0, t1_1]):
-        R_01    = _sym_rot(H[0], t1)               # cos(t1)/sin(t1) as atoms
-        d5_expr = H[1].dot(R_01.T * R_06 * H[5])
+        R_01      = _sym_rot(H[0], t1)
+        d5_expr   = H[1].dot(R_01.T * R_06 * H[5])
         t5_0_expr, t5_1_expr = _sp4(H[5], H[4], H[1], d5_expr)
+
         t5_0 = sp.Symbol(f't5_0_q1{i_q1}')
         t5_1 = sp.Symbol(f't5_1_q1{i_q1}')
         t5_syms.append((t5_0, t5_1))
-        raw += [(t5_0, t5_0_expr), (t5_1, t5_1_expr)]
 
-    # ── th14, q6, d_inner, d3 ────────────────────────────────────────────────
-    # Key: R_01.T @ R_06 @ H[5] is shared between th14 and the q5=0,q5=1
-    # branches for the same q1 — global CSE will factor it out automatically.
-    mid_syms = {}
+        repl, red = sp.cse([t5_0_expr, t5_1_expr], optimizations='basic')
+        stages.append((f'stage2_q5_q1{i_q1}', [t1], repl, red, [t5_0, t5_1]))
+
+    # ── stage 3: theta_14, q6, d_inner, d3 ───────────────────────────────────
+    mid_syms = {}  # keyed by (i_q1, i_q5)
+
     for i_q1, t1 in enumerate([t1_0, t1_1]):
         R_01 = _sym_rot(H[0], t1)
         for i_q5, t5 in enumerate(t5_syms[i_q1]):
             R_45 = _sym_rot(H[4], t5)
 
-            th14_expr = _sp1(R_45 * H[5],   R_01.T * R_06 * H[5], H[1])
-            q6_expr   = _sp1(R_45.T * H[1], R_06.T * R_01 * H[1], -H[5])
+            th14_expr = _sp1(R_45 * H[5],     R_01.T * R_06 * H[5], H[1])
+            q6_expr   = _sp1(R_45.T * H[1],   R_06.T * R_01 * H[1], -H[5])
+
+            # introduce fresh symbols for theta_14 and q6
             th14 = sp.Symbol(f'th14_q1{i_q1}_q5{i_q5}')
             q6   = sp.Symbol(f'q6_q1{i_q1}_q5{i_q5}')
-            raw += [(th14, th14_expr), (q6, q6_expr)]
 
-            # d_inner uses th14 as atom — no blowup
-            d_inner = R_01.T * p_06 - P[1] - _sym_rot(H[1], th14) * P[4]
+            repl, red = sp.cse([th14_expr, q6_expr], optimizations='basic')
+            stages.append((f'stage3a_th14q6_q1{i_q1}_q5{i_q5}',
+                           [t1, t5], repl, red, [th14, q6]))
+
+            # d_inner using fresh th14 symbol
+            d_inner_expr = R_01.T * p_06 - P[1] - _sym_rot(H[1], th14) * P[4]
+            d_inner_exprs = [d_inner_expr[0], d_inner_expr[1], d_inner_expr[2]]
+            d3_expr = sp.sqrt(sum(e**2 for e in d_inner_exprs))
+
             di0 = sp.Symbol(f'di0_q1{i_q1}_q5{i_q5}')
             di1 = sp.Symbol(f'di1_q1{i_q1}_q5{i_q5}')
             di2 = sp.Symbol(f'di2_q1{i_q1}_q5{i_q5}')
             d3  = sp.Symbol(f'd3_q1{i_q1}_q5{i_q5}')
-            d3_expr = sp.sqrt(d_inner[0]**2 + d_inner[1]**2 + d_inner[2]**2)
-            raw += [(di0, d_inner[0]), (di1, d_inner[1]),
-                    (di2, d_inner[2]), (d3, d3_expr)]
+
+            repl, red = sp.cse(d_inner_exprs + [d3_expr], optimizations='basic')
+            stages.append((f'stage3b_dinner_q1{i_q1}_q5{i_q5}',
+                           [t1, t5, th14], repl, red, [di0, di1, di2, d3]))
+
             mid_syms[(i_q1, i_q5)] = (th14, q6, di0, di1, di2, d3)
 
-    # ── q3 ────────────────────────────────────────────────────────────────────
-    # _sp3 args are all rational + the d3 atom → polynomial in d3 after expand
+    # ── stage 4: SP3 → t3_0, t3_1 ────────────────────────────────────────────
     t3_syms = {}
+
     for i_q1 in range(2):
         for i_q5 in range(2):
-            *_, d3 = mid_syms[(i_q1, i_q5)]
+            th14, q6, di0, di1, di2, d3 = mid_syms[(i_q1, i_q5)]
+            d_inner_sym = sp.Matrix([di0, di1, di2])
+
             t3_0_expr, t3_1_expr = _sp3(-P[3], P[2], H[1], d3)
+
             t3_0 = sp.Symbol(f't3_0_q1{i_q1}_q5{i_q5}')
             t3_1 = sp.Symbol(f't3_1_q1{i_q1}_q5{i_q5}')
             t3_syms[(i_q1, i_q5)] = (t3_0, t3_1)
-            raw += [(t3_0, t3_0_expr), (t3_1, t3_1_expr)]
 
-    # ── q2, q4 per branch ─────────────────────────────────────────────────────
-    branch_joints = []
+            repl, red = sp.cse([t3_0_expr, t3_1_expr], optimizations='basic')
+            stages.append((f'stage4_q3_q1{i_q1}_q5{i_q5}',
+                           [d3], repl, red, [t3_0, t3_1]))
+
+    # ── stage 5: q2, q4 per full branch ──────────────────────────────────────
+    # branch order: (q1=0,q5=0,q3=0), (q1=0,q5=0,q3=1),
+    #               (q1=0,q5=1,q3=0), ..., (q1=1,q5=1,q3=1)
+    branch_joints = []  # list of (q1, q2, q3, q4, q5, q6) sympy exprs
+
     for i_q1, t1 in enumerate([t1_0, t1_1]):
         for i_q5, t5 in enumerate(t5_syms[i_q1]):
-            th14, q6, di0, di1, di2, _ = mid_syms[(i_q1, i_q5)]
+            th14, q6, di0, di1, di2, d3 = mid_syms[(i_q1, i_q5)]
             d_inner_sym = sp.Matrix([di0, di1, di2])
+
             for i_q3, t3 in enumerate(t3_syms[(i_q1, i_q5)]):
-                q2_expr = _sp1(P[2] + _sym_rot(H[1], t3) * P[3], d_inner_sym, H[1])
+                q2_expr = _sp1(
+                    P[2] + _sym_rot(H[1], t3) * P[3],
+                    d_inner_sym,
+                    H[1],
+                )
                 q4_expr = th14 - q2_expr - t3
-                q2 = sp.Symbol(f'q2_b{i_q1}{i_q5}{i_q3}')
-                q4 = sp.Symbol(f'q4_b{i_q1}{i_q5}{i_q3}')
-                raw += [(q2, q2_expr), (q4, q4_expr)]
-                branch_joints.append((t1, q2, t3, q4, t5, q6))
 
-    # ── ONE global CSE pass ───────────────────────────────────────────────────
-    all_syms  = [s for s, _ in raw]
-    all_exprs = [e for _, e in raw]
-    print(f"  Running global CSE on {len(all_exprs)} expressions...")
-    global_repl, global_red = sp.cse(all_exprs, optimizations='basic')
-    print(f"  Global CSE: {len(global_repl)} shared subexpressions extracted")
+                deps = [t1, t5, th14, di0, di1, di2, t3]
+                repl, red = sp.cse([q2_expr, q4_expr], optimizations='basic')
+                name = f'stage5_q2q4_q1{i_q1}_q5{i_q5}_q3{i_q3}'
 
-    return input_syms, all_syms, global_repl, global_red, branch_joints
+                q2_sym = sp.Symbol(f'q2_{name}')
+                q4_sym = sp.Symbol(f'q4_{name}')
 
+                stages.append((name, deps, repl, red, [q2_sym, q4_sym]))
+
+                branch_joints.append((t1, q2_sym, t3, q4_sym, t5, q6))
+
+    return input_syms, stages, branch_joints
+
+
+# ── code emitter ──────────────────────────────────────────────────────────────
 
 class _JnpPrinter(PythonCodePrinter):
     def _print_sin(self, expr):
@@ -253,14 +295,14 @@ class _JnpPrinter(PythonCodePrinter):
         return repr(float(expr))
 
 
-def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
-               branch_joints, out_path):
+def _emit_file(robot_name, input_syms, stages, branch_joints, out_path):
     printer = _JnpPrinter()
 
     def emit(expr):
         return printer.doprint(expr)
 
-    lines = [
+    lines = []
+    lines += [
         f'# AUTO-GENERATED by jaik.kinematics.codegen — do not edit',
         f'# Robot: {robot_name}  |  Family: 3p2i  |  Generated: {date.today()}',
         'import jax.numpy as jnp',
@@ -279,6 +321,7 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
         '',
     ]
 
+    # unpack input symbols
     sym_names = [str(s) for s in input_syms]
     for i in range(3):
         for j in range(3):
@@ -287,62 +330,28 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
         lines.append(f'    {sym_names[9+i]} = p_0T[{i}]')
     lines.append('')
 
-    # # All globally shared subexpressions first (sin/cos of boundary angles, etc.)
-    # lines.append('    # ── global CSE: shared subexpressions ──')
-    # for sym, expr in global_repl:
-    #     lines.append(f'    {sym} = {emit(expr)}')
-    # lines.append('')
+    # emit each stage's CSE assignments
+    for (stage_name, dep_syms, repl, red, out_syms) in stages:
+        lines.append(f'    # ── {stage_name} ──')
+        for sym, expr in repl:
+            lines.append(f'    {sym} = {emit(expr)}')
+        for out_sym, r_expr in zip(out_syms, red):
+            lines.append(f'    {out_sym} = {emit(r_expr)}')
+        lines.append('')
 
-    # # Stage outputs, each reduced to reference the shared subexpressions above
-    # lines.append('    # ── stage outputs ──')
-    # for sym, red_expr in zip(all_syms, global_red):
-    #     lines.append(f'    {sym} = {emit(red_expr)}')
-    # lines.append('')
-
-    import re
-
-    def get_max_x(sym) -> int:
-        """
-        Finds the maximum integer 'n' for all symbols following the pattern 'xn'.
-        Works for both single symbols and complex expressions.
-        """
-        max_x = -1
-        
-        # .atoms(sp.Symbol) retrieves all unique variables in the expression
-        for atom in sym.atoms(sp.Symbol):
-            name = atom.name
-            # Check if the name starts with 'x' followed by digits
-            if name.startswith('x') and name[1:].isdigit():
-                index = int(name[1:])
-                if index > max_x:
-                    max_x = index
-                    
-        return max_x
-
-    # All globally shared subexpressions first (sin/cos of boundary angles, etc.)
-    # TODO: Bit of a janky way to get the order right, but it works for now..
-    lines.append('    # ── global CSE: shared subexpressions + stage outputs ──')
-    for sym, expr in global_repl:
-        x_ind_normal = get_max_x(sym)
-        lines.append(f'    {sym} = {emit(expr)}')
-        for sym, red_expr in zip(all_syms, global_red):
-            x_ind_staged = get_max_x(red_expr)
-            if x_ind_staged == x_ind_normal:
-                lines.append(f'    {sym} = {emit(red_expr)}')
-    lines.append('')
-
-    # for sym, red_expr in zip(all_syms, global_red):
-    #     lines.append(f'    {sym} = {emit(red_expr)}')
-    # lines.append('')
-
+    # stack branches into (6, 8)
     assert len(branch_joints) == 8
     for b, joints in enumerate(branch_joints):
-        lines.append(f'    _b{b} = jnp.array([{", ".join(emit(j) for j in joints)}])')
+        joint_strs = [emit(j) for j in joints]
+        lines.append(f'    _b{b} = jnp.array([{", ".join(joint_strs)}])')
 
     lines += [
         '',
         '    Q = jnp.stack([',
-        *[f'        _b{b},' for b in range(8)],
+    ]
+    for b in range(8):
+        lines.append(f'        _b{b},')
+    lines += [
         '    ], axis=1)  # (6, 8)',
         '',
         '    valid = ~jnp.isnan(Q).any(axis=0)',
@@ -352,7 +361,6 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
 
     out_path.write_text('\n'.join(lines))
     print(f"  Written: {out_path} ({len(lines)} lines)")
-
 
 
 # ── validation ────────────────────────────────────────────────────────────────
@@ -481,10 +489,10 @@ def generate(robot_name, out_dir=None):
     t0 = time.perf_counter()
 
     print("  Deriving symbolic IK (staged)...")
-    input_syms, all_syms, global_repl, global_red, branch_joints = _derive_global(H_num, P_num)
+    input_syms, stages, branch_joints = _derive_staged(H_num, P_num)
     print(f"  Derivation done in {time.perf_counter()-t0:.1f}s")
 
-    _emit_file(robot_name, input_syms, all_syms, global_repl, global_red, branch_joints, out_path)
+    _emit_file(robot_name, input_syms, stages, branch_joints, out_path)
     _validate(robot_name, out_path)
 
     print(f"  Total: {time.perf_counter()-t0:.1f}s")

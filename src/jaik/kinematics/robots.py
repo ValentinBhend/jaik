@@ -230,7 +230,7 @@ def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
                 f"Run codegen first, or use solver='auto' or 'general'."
             )
 
-    if resolved not in ("cse", "general", "numpy"):
+    if resolved not in ("cse", "cse_sincos", "general", "numpy"):
         raise ValueError(
             f"Unknown solver '{solver}'. "
             f"Choose from: 'auto', 'cse', 'general', 'numpy'."
@@ -254,6 +254,8 @@ def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
         return _make_numpy_callables(kin, family)
     elif resolved == "cse":
         return _make_cse_callables(kin, robot_name)
+    elif resolved == "cse_sincos":
+        return _make_cse_sincos_callables(kin, robot_name)
     else:
         return _make_jax_callables(kin, family)
 
@@ -291,6 +293,31 @@ def _make_cse_callables(kin, robot_name):
     from jaik._jax.fk import _fk as _fk_jax
 
     module_name = f"jaik._jax._generated.ik_{robot_name.lower()}"
+    mod = importlib.import_module(module_name)
+    fn_name = f"ik_{robot_name.lower()}"
+    _solver = getattr(mod, fn_name)
+
+    H  = jnp.asarray(kin['H'])
+    P  = jnp.asarray(kin['P'])
+    RT = jnp.asarray(kin['RT'])
+
+    def fk(q):
+        R, p = _fk_jax(q, H, P)
+        return R @ RT, p
+
+    def ik(R_target, p_target):
+        R_06 = R_target @ RT.T
+        return _solver(R_06, p_target)
+
+    return fk, ik
+
+
+def _make_cse_sincos_callables(kin, robot_name):
+    """CSE-generated solver for a specific named robot."""
+    import jax.numpy as jnp
+    from jaik._jax.fk import _fk as _fk_jax
+
+    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos"
     mod = importlib.import_module(module_name)
     fn_name = f"ik_{robot_name.lower()}"
     _solver = getattr(mod, fn_name)
