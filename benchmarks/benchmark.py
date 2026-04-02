@@ -49,8 +49,8 @@ BATCH_SIZES = [1, 8, 32, 128, 256, 512, 1024, 2048, 2**12, 2**13, 2**14, 2**15, 
 
 # ── setup ─────────────────────────────────────────────────────────────────────
 
-fk_jax, ik_jax = jaik.make_robot(ROBOT, backend="jax")
-fk_np,  ik_np  = jaik.make_robot(ROBOT, backend="numpy")
+fk_jax, ik_jax = jaik.make_robot(ROBOT, solver="cse")
+fk_np,  ik_np  = jaik.make_robot(ROBOT, solver="numpy")
 
 rng   = np.random.default_rng(0)
 q_np  = rng.uniform(-np.pi, np.pi, 6)

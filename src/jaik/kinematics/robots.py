@@ -2,33 +2,23 @@
 """
 Robot definitions and the make_robot factory.
 
-Two ways to get fk/ik callables:
-  1. Named preset:   fk, ik = make_robot("UR10e")
-  2. Custom DH:      fk, ik = make_robot_from_dh(alpha, a, d)
-
 Usage:
-    fk, ik = jaik.make_robot("UR10e")
+    fk, ik = jaik.make_robot("UR10e")                    # fastest available
+    fk, ik = jaik.make_robot("UR10e", solver="cse")      # explicit CSE (fast, UR-specific)
+    fk, ik = jaik.make_robot("UR10e", solver="general")  # IK-Geo general solver
+    fk, ik = jaik.make_robot("UR10e", solver="numpy")    # numpy backend, for debugging
 
-    # call directly from Python
-    R, p = fk(q)
-    Q, is_LS = ik(R, p)
+    fk, ik = jaik.make_robot_from_dh(alpha, a, d)        # custom DH parameters
 
-    # or jit for performance
-    fk_jit = jax.jit(fk)
-    ik_jit = jax.jit(ik)
-
-    # or vmap over a batch
-    fk_batch = jax.vmap(fk)
-    ik_batch = jax.vmap(ik)
-
-    # numpy backend for debugging
-    fk, ik = jaik.make_robot("UR10e", backend="numpy")
+    jaik.available_robots()                               # list of named presets
+    jaik.robot_infos("UR10e")                            # dict of robot metadata
 
 URDF parsing is intentionally not included — use a dependency like
 pyroki or yourdfpy to extract DH parameters, then pass them to
 make_robot_from_dh.
 """
 from typing import Callable
+import importlib
 import numpy as np
 from jaik.kinematics.convention_conversions import dh_to_kin
 from jaik.kinematics.adjustments import adjust_kin_for_3p2i
@@ -68,30 +58,41 @@ _UR_R6T = np.array([[1, 0,  0],
                     [0, 0, -1],
                     [0, 1,  0]], dtype=float)
 
+# Solvers always available regardless of robot
+_BASE_SOLVERS = ["auto", "general", "numpy"]
+
 
 # ── public API ────────────────────────────────────────────────────────────────
 
 def make_robot(
-    name: str,
-    backend: str = "jax",
-    R_6T: np.ndarray = None,
+    name:   str,
+    solver: str = "auto",
+    R_6T:   np.ndarray = None,
 ) -> tuple[Callable, Callable]:
     """
     Return (fk, ik) callables for a named UR robot.
 
     Args:
-        name:    Robot name, e.g. "UR10e". See available_robots().
-        backend: "jax" (default) or "numpy" (for debugging).
-        R_6T:    Additional tool frame rotation applied on top of the standard
-                 UR convention. Defaults to None (standard UR convention only).
-                 Pass np.eye(3) to get raw joint-frame output with no tool frame.
+        name:   Robot name, e.g. "UR10e". See available_robots().
+        solver: Which IK solver to use:
+                  "auto"    — fastest available (default)
+                  "cse"     — CSE-generated, fast, robot-specific
+                  "general" — IK-Geo general JAX solver
+                  "numpy"   — numpy backend, for debugging
+                See robot_infos(name)["available_solvers"] for what is
+                available for a specific robot.
+        R_6T:   Additional tool frame rotation applied on top of the standard
+                UR convention (Rx 90°). Pass np.eye(3) to remove the default
+                UR tool frame and get raw joint-frame output.
 
     Returns:
-        fk: q -> (R, p)           forward kinematics
-        ik: (R, p) -> (Q, is_LS)  inverse kinematics, all 8 branches
+        fk: q -> (R, p)            forward kinematics
+        ik: (R, p) -> (Q, valid)   IK, all 8 branches
+                                   Q:     (6, 8) joint angles, NaN = infeasible
+                                   valid: (8,)   bool mask of feasible branches
 
     Raises:
-        ValueError: if name or backend is not recognised.
+        ValueError: if name, solver, or combination is not supported.
     """
     if name not in _UR_PARAMS:
         raise ValueError(
@@ -102,19 +103,22 @@ def make_robot(
     p = _UR_PARAMS[name]
     a = np.array([0, p["a2"], p["a3"], 0, 0, 0])
     d = np.array([p["d1"], 0, 0, p["d4"], p["d5"], p["d6"]])
-
-    # UR default tool frame, optionally composed with user-supplied R_6T
     r6t = _UR_R6T if R_6T is None else _UR_R6T @ np.asarray(R_6T, dtype=float)
 
-    return _build_callables(_UR_ALPHA, a, d, r6t, backend, family="3p2i")
+    return _build_callables(
+        _UR_ALPHA, a, d, r6t,
+        solver=solver,
+        family="3p2i",
+        robot_name=name,
+    )
 
 
 def make_robot_from_dh(
-    alpha: np.ndarray,
-    a: np.ndarray,
-    d: np.ndarray,
-    backend: str = "jax",
-    R_6T: np.ndarray = None,
+    alpha:  np.ndarray,
+    a:      np.ndarray,
+    d:      np.ndarray,
+    solver: str = "auto",
+    R_6T:   np.ndarray = None,
     family: str = "3p2i",
 ) -> tuple[Callable, Callable]:
     """
@@ -124,19 +128,20 @@ def make_robot_from_dh(
     or from a robot's calibration file.
 
     Args:
-        alpha:   (6,) link twist angles [rad]
-        a:       (6,) link lengths [m], signed per DH convention
-        d:       (6,) link offsets [m]
-        backend: "jax" (default) or "numpy".
-        R_6T:    Optional (3,3) tool frame rotation. Defaults to identity.
-        family:  Kinematic family. Currently only "3p2i" is supported.
+        alpha:  (6,) link twist angles [rad]
+        a:      (6,) link lengths [m], signed per DH convention
+        d:      (6,) link offsets [m]
+        solver: "auto", "general", or "numpy". "cse" is not available for
+                custom robots since it requires pre-generated code.
+        R_6T:   Optional (3,3) tool frame rotation. Defaults to identity.
+        family: Kinematic family. Currently only "3p2i" is supported.
 
     Returns:
         fk: q -> (R, p)
-        ik: (R, p) -> (Q, is_LS)
+        ik: (R, p) -> (Q, valid)
 
     Raises:
-        ValueError: if family or backend is not supported.
+        ValueError: if family or solver is not supported.
     """
     if family != "3p2i":
         raise ValueError(
@@ -144,7 +149,8 @@ def make_robot_from_dh(
             f"Currently supported: '3p2i'."
         )
     r6t = np.asarray(R_6T, dtype=float) if R_6T is not None else np.eye(3)
-    return _build_callables(alpha, a, d, r6t, backend, family=family)
+    return _build_callables(alpha, a, d, r6t, solver=solver,
+                            family=family, robot_name=None)
 
 
 def available_robots() -> list:
@@ -152,7 +158,53 @@ def available_robots() -> list:
     return sorted(_UR_PARAMS.keys())
 
 
+def robot_infos(name: str) -> dict:
+    """
+    Return a dict of metadata for a named robot.
+
+    Keys:
+        available_solvers: list of solver names accepted by make_robot(name, solver=...)
+
+    Example:
+        jaik.robot_infos("UR10e")
+        # {"available_solvers": ["auto", "cse", "general", "numpy"]}
+
+        jaik.robot_infos("UR3e")
+        # {"available_solvers": ["auto", "general", "numpy"]}  # if no CSE generated yet
+    """
+    if name not in _UR_PARAMS:
+        raise ValueError(
+            f"Unknown robot '{name}'. "
+            f"Available: {sorted(_UR_PARAMS.keys())}."
+        )
+    solvers = list(_BASE_SOLVERS)
+    if _has_cse(name):
+        solvers.insert(1, "cse")  # after "auto", before "general"
+    return {
+        "available_solvers": solvers,
+    }
+
+
 # ── internal ──────────────────────────────────────────────────────────────────
+
+def _has_cse(name: str) -> bool:
+    """Check if a CSE-generated solver exists for this robot."""
+    module_name = f"jaik._jax._generated.ik_{name.lower()}"
+    try:
+        importlib.import_module(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+def _resolve_solver(solver: str, robot_name: str | None) -> str:
+    """Resolve 'auto' to the best available concrete solver."""
+    if solver != "auto":
+        return solver
+    if robot_name is not None and _has_cse(robot_name):
+        return "cse"
+    return "general"
+
 
 def _build_kin(alpha, a, d, R_6T, family):
     """Build and adjust a raw kin dict."""
@@ -163,20 +215,51 @@ def _build_kin(alpha, a, d, R_6T, family):
     return kin
 
 
-def _build_callables(alpha, a, d, R_6T, backend, family):
-    """Build (fk, ik) callables for the given backend."""
-    if backend not in ("jax", "numpy"):
+def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
+    resolved = _resolve_solver(solver, robot_name)
+
+    if resolved == "cse":
+        if robot_name is None:
+            raise ValueError(
+                "solver='cse' requires a named robot — use make_robot() "
+                "instead of make_robot_from_dh()."
+            )
+        if not _has_cse(robot_name):
+            raise ValueError(
+                f"No CSE solver available for '{robot_name}'. "
+                f"Run codegen first, or use solver='auto' or 'general'."
+            )
+
+    if resolved not in ("cse", "general", "numpy"):
         raise ValueError(
-            f"Unknown backend '{backend}'. Choose 'jax' or 'numpy'."
+            f"Unknown solver '{solver}'. "
+            f"Choose from: 'auto', 'cse', 'general', 'numpy'."
         )
+
+    if resolved == "cse" and robot_name is None:
+        raise ValueError(
+            "solver='cse' requires a named robot. "
+            "Use make_robot() instead of make_robot_from_dh()."
+        )
+
+    if resolved == "cse" and not _has_cse(robot_name):
+        raise ValueError(
+            f"No CSE solver available for '{robot_name}'. "
+            f"Run codegen first, or use solver='auto' or 'general'."
+        )
+
     kin = _build_kin(alpha, a, d, R_6T, family)
-    if backend == "jax":
-        return _make_jax_callables(kin, family)
-    else:
+
+    if resolved == "numpy":
         return _make_numpy_callables(kin, family)
+    elif resolved == "cse":
+        return _make_cse_callables(kin, robot_name)
+    else:
+        return _make_jax_callables(kin, family)
 
 
-def _make_jax_callables_slow(kin, family):
+def _make_jax_callables(kin, family):
+    """JAX general solver (IK-Geo 3p2i)."""
     import jax.numpy as jnp
     from jaik._jax.fk import _fk as _fk_jax
 
@@ -195,14 +278,22 @@ def _make_jax_callables_slow(kin, family):
 
     def ik(R_target, p_target):
         R_06 = R_target @ RT.T
-        return _solver(R_06, p_target, H, P)
+        Q, _ = _solver(R_06, p_target, H, P)
+        valid = ~__import__('jax').numpy.isnan(Q).any(axis=0)
+        return Q, valid
 
     return fk, ik
 
-def _make_jax_callables(kin, family):
+
+def _make_cse_callables(kin, robot_name):
+    """CSE-generated solver for a specific named robot."""
     import jax.numpy as jnp
     from jaik._jax.fk import _fk as _fk_jax
-    from jaik._jax.ik_3p2i import ik_3_parallel_2_intersecting as _solver
+
+    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}"
+    mod = importlib.import_module(module_name)
+    fn_name = f"ik_{robot_name.lower()}"
+    _solver = getattr(mod, fn_name)
 
     H  = jnp.asarray(kin['H'])
     P  = jnp.asarray(kin['P'])
@@ -213,19 +304,14 @@ def _make_jax_callables(kin, family):
         return R @ RT, p
 
     def ik(R_target, p_target):
-        """
-        Returns (Q, valid_mask):
-            Q:          (6, 8) joint angles, NaN for infeasible branches
-            valid_mask: (8,) bool, True where branch is geometrically valid
-        """
         R_06 = R_target @ RT.T
-        Q, _ = _solver(R_06, p_target, H, P)
-        valid_mask = ~jnp.isnan(Q).any(axis=0)   # (8,)
-        return Q, valid_mask
+        return _solver(R_06, p_target)
 
     return fk, ik
 
+
 def _make_numpy_callables(kin, family):
+    """Numpy solver for debugging."""
     from jaik._numpy.fk import _fk as _fk_np
 
     if family == "3p2i":
@@ -241,6 +327,9 @@ def _make_numpy_callables(kin, family):
 
     def ik(R_target, p_target):
         R_06 = R_target @ RT.T
-        return _solver(R_06, p_target, kin)
+        Q, is_LS = _solver(R_06, p_target, kin)
+        # convert is_LS to valid mask for API consistency
+        valid = ~is_LS.any(axis=0)
+        return Q, valid
 
     return fk, ik
