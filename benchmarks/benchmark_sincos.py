@@ -31,12 +31,14 @@ import jaik
 if "--fast" in sys.argv:
     os.environ["XLA_FLAGS"] = (
         "--xla_cpu_enable_fast_math=true "
-        "--xla_cpu_fast_math_honor_nans=false "
-        "--xla_cpu_fast_math_honor_infs=false "
+        # "--xla_cpu_fast_math_honor_nans=false "
+        # "--xla_cpu_fast_math_honor_infs=false "
         "--xla_cpu_fast_math_honor_division=false "
         "--xla_cpu_fast_math_honor_functions=false "
         "--xla_cpu_enable_fast_min_max=true"
     )
+
+# jax.config.update("jax_enable_x64", True)
 
 # ── configuration ─────────────────────────────────────────────────────────────
 
@@ -49,8 +51,8 @@ BATCH_SIZES = [1, 8, 32, 128, 256, 512, 1024, 2048, 2**12, 2**13, 2**14, 2**15, 
 
 # ── setup ─────────────────────────────────────────────────────────────────────
 
-fk_jax, ik_jax = jaik.make_robot(ROBOT, solver="cse_sincos")
-fk_np,  ik_np  = jaik.make_robot(ROBOT, solver="numpy")
+fk_jax, ik_jax, _ = jaik.make_robot(ROBOT, solver="cse_sincos")
+fk_np,  ik_np, _  = jaik.make_robot(ROBOT, solver="numpy")
 
 rng   = np.random.default_rng(0)
 q_np  = rng.uniform(-np.pi, np.pi, 6)

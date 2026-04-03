@@ -234,7 +234,7 @@ def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
                 f"Run codegen first, or use solver='auto' or 'general'."
             )
 
-    if resolved not in ("cse", "cse_sincos", "general", "numpy"):
+    if resolved not in ("cse", "cse_sincos", "general", "numpy", "numba"):
         raise ValueError(
             f"Unknown solver '{solver}'. "
             f"Choose from: 'auto', 'cse', 'general', 'numpy'."
@@ -260,6 +260,8 @@ def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
         return _make_cse_callables(kin, robot_name)
     elif resolved == "cse_sincos":
         return _make_cse_sincos_callables(kin, robot_name)
+    elif resolved == "numba":
+        return _make_numba_callables(kin, robot_name)
     else:
         return _make_jax_callables(kin, family)
 
@@ -282,13 +284,16 @@ def _make_jax_callables(kin, family):
         R, p = _fk_jax(q, H, P)
         return R @ RT, p
 
-    def ik(R_target, p_target):
+    def ik_full(R_target, p_target):
         R_06 = R_target @ RT.T
         Q, _ = _solver(R_06, p_target, H, P)
         valid = ~jnp.isnan(Q).any(axis=0)
         return Q, valid
+    
+    def ik_closest(R_target, p_target, q_ref, weights=None):
+        raise NotImplementedError
 
-    return fk, ik
+    return fk, ik_full, ik_closest
 
 
 def _make_cse_callables(kin, robot_name):
@@ -307,11 +312,14 @@ def _make_cse_callables(kin, robot_name):
         R, p = _fk_jax(q, H, P)
         return R @ RT, p
 
-    def ik(R_target, p_target):
+    def ik_full(R_target, p_target):
         R_06 = R_target @ RT.T
         return _solver(R_06, p_target)
+    
+    def ik_closest(R_target, p_target, q_ref, weights=None):
+        raise NotImplementedError
 
-    return fk, ik
+    return fk, ik_full, ik_closest
 
 
 def _make_cse_sincos_callables(kin, robot_name):
@@ -330,11 +338,56 @@ def _make_cse_sincos_callables(kin, robot_name):
         R, p = _fk_jax(q, H, P)
         return R @ RT, p
 
-    def ik(R_target, p_target):
+    def ik_full(R_target, p_target):
         R_06 = R_target @ RT.T
         return _solver(R_06, p_target)
+    
+    def ik_closest(R_target, p_target, q_ref, weights=None):
+        raise NotImplementedError
 
-    return fk, ik
+    return fk, ik_full, ik_closest
+
+
+def _make_numba_callables(kin, robot_name):
+    """CSE-generated solver for a specific named robot."""
+    from numba import njit # TODO emit message to install optional if it fails..
+
+    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos_numba"
+    mod = importlib.import_module(module_name)
+    fn_name = f"ik_{robot_name.lower()}"
+    _solver = getattr(mod, fn_name)
+
+    H  = np.asarray(kin['H'], dtype=np.float64)
+    P  = np.asarray(kin['P'], dtype=np.float64)
+    RT = np.asarray(kin['RT'], dtype=np.float64)
+
+    def fk(q):
+        R, p = _fk_jax(q, H, P)
+        return R @ RT, p
+
+    @njit
+    def ik_full(R_target, p_target):
+        # R_06 = R_target @ RT.T
+        # return _solver(R_06, p_target)
+
+        r00 = R_target[0,0]*RT[0,0] + R_target[0,1]*RT[0,1] + R_target[0,2]*RT[0,2]
+        r01 = R_target[0,0]*RT[1,0] + R_target[0,1]*RT[1,1] + R_target[0,2]*RT[1,2]
+        r02 = R_target[0,0]*RT[2,0] + R_target[0,1]*RT[2,1] + R_target[0,2]*RT[2,2]
+
+        r10 = R_target[1,0]*RT[0,0] + R_target[1,1]*RT[0,1] + R_target[1,2]*RT[0,2]
+        r11 = R_target[1,0]*RT[1,0] + R_target[1,1]*RT[1,1] + R_target[1,2]*RT[1,2]
+        r12 = R_target[1,0]*RT[2,0] + R_target[1,1]*RT[2,1] + R_target[1,2]*RT[2,2]
+
+        r20 = R_target[2,0]*RT[0,0] + R_target[2,1]*RT[0,1] + R_target[2,2]*RT[0,2]
+        r21 = R_target[2,0]*RT[1,0] + R_target[2,1]*RT[1,1] + R_target[2,2]*RT[1,2]
+        r22 = R_target[2,0]*RT[2,0] + R_target[2,1]*RT[2,1] + R_target[2,2]*RT[2,2]
+        p1, p2, p3 = p_target
+        return _solver(r00, r01, r02, r10, r11, r12, r20, r21, r22, p1, p2, p3)
+    
+    def ik_closest(R_target, p_target, q_ref, weights=None):
+        raise NotImplementedError
+
+    return fk, ik_full, ik_closest
 
 
 def _make_numpy_callables(kin, family):
@@ -351,11 +404,14 @@ def _make_numpy_callables(kin, family):
         R, p = _fk_np(q, kin)
         return R @ RT, p
 
-    def ik(R_target, p_target):
+    def ik_full(R_target, p_target):
         R_06 = R_target @ RT.T
         Q, is_LS = _solver(R_06, p_target, kin)
         # convert is_LS to valid mask for API consistency
         valid = ~is_LS.any(axis=0)
         return Q, valid
+    
+    def ik_closest(R_target, p_target, q_ref, weights=None):
+        raise NotImplementedError
 
-    return fk, ik
+    return fk, ik_full, ik_closest

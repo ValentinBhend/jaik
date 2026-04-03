@@ -416,6 +416,10 @@ def _derive_global(H_num, P_num):
     # all_exprs = [sp.simplify(e) for e in all_exprs]
     # all_exprs = [sp.trigsimp(e) for e in all_exprs]
 
+
+    # all_exprs = [e.replace(x / abs(x), sp.Sign(x)) for e in all_exprs] # This looks for any expression / abs(same expression)
+    # all_exprs = [e.replace(sp.sqrt(a**2 + b**2), hypot(a, b)) for e in all_exprs] # Pattern for 1/sqrt(a**2 + b**2)
+
     blacklist = set(all_syms) | set(input_syms)
 
     # Define your inputs that should be "ignored" for constant-only folding
@@ -426,8 +430,16 @@ def _derive_global(H_num, P_num):
     print(f"  Global CSE: {len(const_repl)} constant subexpressions extracted")
     print(f"  Global CSE: {len(global_repl)} shared subexpressions extracted")
 
+    # from sympy import abs, Sign, Wild
+
+    # expr = expr.replace(
+    #     lambda e: e.is_Pow and e.exp == sp.Rational(1, 2) and isinstance(e.base, sp.Add) 
+    #             and all(isinstance(term, sp.Pow) and term.exp == 2 for term in e.base.args),
+    #     lambda e: hypot(*[term.base for term in e.base.args])
+    # )
+
     def finalize_subs(subs_list, red_list):
-        # hypot = sp.Function('hypot')
+        hypot = sp.Function('hypot')
         
         a = sp.Wild('a', properties=[lambda x: x.is_Symbol])
         b = sp.Wild('b', properties=[lambda x: x.is_Symbol])
@@ -451,14 +463,13 @@ def _derive_global(H_num, P_num):
         new_red  = [_replace(expr) for expr in red_list]
         return new_repl, new_red
 
-    # global_repl, global_red = finalize_subs(global_repl, global_red)
-
+    global_repl, global_red = finalize_subs(global_repl, global_red)
     # global_repl, global_red = sp.cse(all_exprs, optimizations='basic')
 
     return input_syms, all_syms, const_repl, global_repl, global_red, branch_joints, param_map
 
 
-class _JnpPrinter(PythonCodePrinter):    
+class _NumbaPrinter(PythonCodePrinter):
     def __init__(self, settings=None):
         super().__init__(settings)
         # Force these to be handled by our _print_ methods
@@ -468,9 +479,9 @@ class _JnpPrinter(PythonCodePrinter):
     def _print_Function(self, expr):
         # This handles the sp.Function('hypot') objects
         if expr.func.__name__ == 'hypot':
-            return f"jnp.hypot({self._print(expr.args[0])}, {self._print(expr.args[1])})"
+            return f"np.hypot({self._print(expr.args[0])}, {self._print(expr.args[1])})"
         if expr.func.__name__ == 'sign':
-            return f"jnp.sign({self._print(expr.args[0])})"
+            return f"np.sign({self._print(expr.args[0])})"
         
         # Fallback for sin, cos, etc.
         return super()._print_Function(expr)
@@ -479,32 +490,32 @@ class _JnpPrinter(PythonCodePrinter):
         arg0 = self._print(expr.args[0])
         arg1 = self._print(expr.args[1])
         return f"np.hypot({arg0}, {arg1})"
+
     # 2. Handle SymPy's symbolic sign function
     def _print_sign(self, expr):
         arg0 = self._print(expr.args[0])
-        return f"jnp.sign({arg0})"
-    
+        return f"np.sign({arg0})"
     def _print_sin(self, expr):
-        return f"jnp.sin({self._print(expr.args[0])})"
+        return f"np.sin({self._print(expr.args[0])})"
     def _print_cos(self, expr):
-        return f"jnp.cos({self._print(expr.args[0])})"
+        return f"np.cos({self._print(expr.args[0])})"
     def _print_sqrt(self, expr):
-        return f"jnp.sqrt({self._print(expr.args[0])})"
+        return f"np.sqrt({self._print(expr.args[0])})"
     def _print_Pow(self, expr):
         b, e = expr.args
         if e == sp.Rational(1, 2):
-            return f"jnp.sqrt({self._print(b)})"
+            return f"np.sqrt({self._print(b)})"
         if e == sp.Rational(-1, 2) or e == -0.5:
-            return f"(1.0 / jnp.sqrt({self._print(b)}))"
+            return f"(1.0 / np.sqrt({self._print(b)}))"
         if e == -1:
             return f"(1.0 / ({self._print(b)}))"
         return f"(({self._print(b)}) ** {self._print(e)})" # Wrap the base in its own parentheses!
     def _print_atan2(self, expr):
-        return f"jnp.arctan2({self._print(expr.args[0])}, {self._print(expr.args[1])})"
+        return f"np.arctan2({self._print(expr.args[0])}, {self._print(expr.args[1])})"
     def _print_acos(self, expr):
-        return f"jnp.arccos({self._print(expr.args[0])})"
+        return f"np.arccos({self._print(expr.args[0])})"
     def _print_asin(self, expr):
-        return f"jnp.arcsin({self._print(expr.args[0])})"
+        return f"np.arcsin({self._print(expr.args[0])})"
     def _print_Float(self, expr):
         return repr(float(expr))
     def _print_Integer(self, expr):
@@ -514,7 +525,7 @@ class _JnpPrinter(PythonCodePrinter):
 
 def _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global_red,
                branch_joints, param_map, out_path):
-    printer = _JnpPrinter()
+    printer = _NumbaPrinter()
 
     def emit(expr):
         return printer.doprint(expr)
@@ -522,16 +533,15 @@ def _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global
     lines = [
         f'# AUTO-GENERATED by jaik.kinematics.codegen — do not edit',
         f'# Robot: {robot_name}  |  Family: 3p2i  |  Generated: {date.today()}',
-        'import jax.numpy as jnp',
-        'from jaxtyping import Float, Bool, Array, jaxtyped',
-        'from beartype import beartype',
+        'from numba import njit',
+        'import numpy as np',
         '',
         '',
-        '@jaxtyped(typechecker=beartype)',
+        '@njit(cache=True, forceinline=True)',
         f'def ik_{robot_name.lower()}(',
-        '    R_06: Float[Array, "3 3"],',
-        '    p_0T: Float[Array, "3"],',
-        ') -> tuple[Float[Array, "12 8"], Bool[Array, "8"]]:',
+        '    r11, r12, r13, r21, r22, r23, r31, r32, r33,',
+        '    p1, p2, p3,',
+        ') -> tuple[np.ndarray, np.ndarray]:',
         f'    """CSE-generated IK for {robot_name} (3p2i).',
         f'    Returns (Q, valid): Q is (12,8), valid is (8,) bool.',
         f'    NaN entries mark infeasible branches."""',
@@ -550,12 +560,12 @@ def _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global
 
     # -- Actual runtime calculations --
     sym_names = [str(s) for s in input_syms]
-    for i in range(3):
-        for j in range(3):
-            lines.append(f'    {sym_names[i*3+j]} = R_06[{i}, {j}]')
-    for i in range(3):
-        lines.append(f'    {sym_names[9+i]} = p_0T[{i}]')
-    lines.append('')
+    # for i in range(3):
+    #     for j in range(3):
+    #         lines.append(f'    {sym_names[i*3+j]} = R_06[{i}, {j}]')
+    # for i in range(3):
+    #     lines.append(f'    {sym_names[9+i]} = p_0T[{i}]')
+    # lines.append('')
 
     # # All globally shared subexpressions first (sin/cos of boundary angles, etc.)
     # lines.append('    # ── global CSE: shared subexpressions ──')
@@ -605,15 +615,15 @@ def _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global
 
     assert len(branch_joints) == 8
     for b, joints in enumerate(branch_joints):
-        lines.append(f'    _b{b} = jnp.array([{", ".join(emit(j) for j in joints)}])')
+        lines.append(f'    _b{b} = np.array([{", ".join(emit(j) for j in joints)}])')
 
     lines += [
         '',
-        '    Q = jnp.stack([',
+        '    Q = np.stack((',
         *[f'        _b{b},' for b in range(8)],
-        '    ], axis=1)  # (12, 8)',
+        '    ), axis=1)  # (12, 8)',
         '',
-        '    valid = ~jnp.isnan(Q).any(axis=0)',
+        '    valid = np.array([np.all(np.isfinite(Q[:, i])) for i in range(8)])',
         '    return Q, valid',
         '',
     ]
@@ -630,7 +640,7 @@ def _validate(robot_name, out_path, n_tests=100):
 
     fk_gen, ik_gen, _ = make_robot(robot_name, solver="general")
 
-    mod_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos"
+    mod_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos_numba"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     mod = importlib.import_module(mod_name)
@@ -651,8 +661,14 @@ def _validate(robot_name, out_path, n_tests=100):
         R_tcp, p_tcp = fk_gen(q)
         R_06 = R_tcp @ RT.T
 
-        sc_Q_cse, valid_cse = ik_cse(R_06, p_tcp)
-        Q_gen, valid_gen = ik_gen(R_tcp, p_tcp)
+        R_06_f64 = np.array(R_06, dtype=np.float64)
+        p_tcp_f64 = np.array(p_tcp, dtype=np.float64)
+        R_tcp_f64 = np.array(R_tcp, dtype=np.float64)
+        r11, r12, r13, r21, r22, r23, r31, r32, r33 = R_06_f64.flatten()
+        p1, p2, p3 = p_tcp_f64
+
+        sc_Q_cse, valid_cse = ik_cse(r11, r12, r13, r21, r22, r23, r31, r32, r33, p1, p2, p3)
+        Q_gen, valid_gen = ik_gen(R_tcp_f64, p_tcp)
 
         sc_Q_cse_np    = np.asarray(sc_Q_cse)
         sines = sc_Q_cse_np[0::2, :]
@@ -743,7 +759,7 @@ def generate(robot_name, out_dir=None):
     H_num = _clean_hp(kin['H'])   # ← clean before symbolic derivation
     P_num = _clean_hp(kin['P'])   # ← clean before symbolic derivation
 
-    out_path = out_dir / f"ik_{robot_name.lower()}_sincos.py"
+    out_path = out_dir / f"ik_{robot_name.lower()}_sincos_numba.py"
 
     print(f"\n=== Generating CSE IK for {robot_name} ===")
     # print(f"  H[:,0] = {H_num[:,0]}  (should be [0,0,1])")
