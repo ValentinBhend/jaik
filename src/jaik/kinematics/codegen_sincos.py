@@ -256,6 +256,30 @@ def _sp4_sincos(p, k, h, d):
     
     return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
 
+def generate_param_symbols(H_num, P_num):
+    param_map = {}
+    
+    def _sym_vec(arr, name):
+        vals = []
+        for i in range(3):
+            # Check if it's a significant constant (not 0 or 1)
+            val = arr[i]
+            if abs(val) > 1e-10 and abs(val - 1.0) > 1e-10 and abs(val + 1.0) > 1e-10:
+                if val > 0:
+                    symbol = sp.Symbol(f"{name}{i+1}", real=True, nonzero=True, positive=True)
+                else:
+                    symbol = sp.Symbol(f"{name}{i+1}", real=True, nonzero=True, negative=True)
+                param_map[symbol] = float(val)
+                vals.append(symbol)
+            else:
+                vals.append(sp.Integer(int(round(val))))
+        return sp.Matrix(vals)
+
+    H_sym = [_sym_vec(H_num[:, j], f"H{j}") for j in range(6)]
+    P_sym = [_sym_vec(P_num[:, j], f"P{j}") for j in range(7)]
+    
+    return H_sym, P_sym, param_map
+
 def _derive_global(H_num, P_num):
     """
     Collect all raw (sym, expr) pairs in dependency order,
@@ -263,11 +287,13 @@ def _derive_global(H_num, P_num):
     d3_*, t3_*) remain explicit atoms that prevent expression blow-up
     while enabling cross-stage CSE to factor sin/cos(t1_0) etc. once.
     """
-    H = [_vec(H_num[:, j]) for j in range(6)]
-    P = [_vec(P_num[:, j]) for j in range(7)]
+    # H = [_vec(H_num[:, j]) for j in range(6)]
+    # P = [_vec(P_num[:, j]) for j in range(7)]
 
-    R_syms = [[sp.Symbol(f'r{i+1}{j+1}') for j in range(3)] for i in range(3)]
-    p_syms = [sp.Symbol(f'p{i+1}') for i in range(3)]
+    H, P, param_map = generate_param_symbols(H_num, P_num)
+
+    R_syms = [[sp.Symbol(f'r{i+1}{j+1}', real=True) for j in range(3)] for i in range(3)]
+    p_syms = [sp.Symbol(f'p{i+1}', real=True) for i in range(3)]
     R_06   = sp.Matrix(R_syms)
     p_0T   = sp.Matrix(p_syms)
     input_syms = [R_syms[i][j] for i in range(3) for j in range(3)] + p_syms
@@ -287,10 +313,10 @@ def _derive_global(H_num, P_num):
         R_01    = _sym_rot(H[0], s_t1, c_t1)               # cos(t1)/sin(t1) as atoms
         d5_expr = H[1].dot(R_01.T * R_06 * H[5])
         (s_t5_0_expr, c_t5_0_expr), (s_t5_1_expr, c_t5_1_expr) = _sp4_sincos(H[5], H[4], H[1], d5_expr)
-        s_t5_0 = sp.Symbol(f's_t5_0_q1{i_q1}')
-        c_t5_0 = sp.Symbol(f'c_t5_0_q1{i_q1}')
-        s_t5_1 = sp.Symbol(f's_t5_1_q1{i_q1}')
-        c_t5_1 = sp.Symbol(f'c_t5_1_q1{i_q1}')
+        s_t5_0 = sp.Symbol(f's_t5_0_q1{i_q1}', real=True)
+        c_t5_0 = sp.Symbol(f'c_t5_0_q1{i_q1}', real=True)
+        s_t5_1 = sp.Symbol(f's_t5_1_q1{i_q1}', real=True)
+        c_t5_1 = sp.Symbol(f'c_t5_1_q1{i_q1}', real=True)
         t5_syms.append(((s_t5_0, c_t5_0), (s_t5_1, c_t5_1)))
         raw += [(s_t5_0, s_t5_0_expr), (c_t5_0, c_t5_0_expr), (s_t5_1, s_t5_1_expr), (c_t5_1, c_t5_1_expr)]
 
@@ -298,28 +324,44 @@ def _derive_global(H_num, P_num):
     # Key: R_01.T @ R_06 @ H[5] is shared between th14 and the q5=0,q5=1
     # branches for the same q1 — global CSE will factor it out automatically.
     mid_syms = {}
+    lazy_sub_map = {}
     for i_q1, (s_t1, c_t1) in enumerate([(s_t1_0, c_t1_0), (s_t1_1, c_t1_1)]):
         R_01 = _sym_rot(H[0], s_t1, c_t1)
         for i_q5, (s_t5, c_t5) in enumerate(t5_syms[i_q1]):
             R_45 = _sym_rot(H[4], s_t5, c_t5)
             s_th14_expr, c_th14_expr = _sp1_sincos(R_45 * H[5],   R_01.T * R_06 * H[5], H[1])
             s_q6_expr, c_q6_expr   = _sp1_sincos(R_45.T * H[1], R_06.T * R_01 * H[1], -H[5])
-            s_th14 = sp.Symbol(f's_th14_q1{i_q1}_q5{i_q5}')
-            c_th14 = sp.Symbol(f'c_th14_q1{i_q1}_q5{i_q5}')
-            s_q6   = sp.Symbol(f's_q6_q1{i_q1}_q5{i_q5}')
-            c_q6   = sp.Symbol(f'c_q6_q1{i_q1}_q5{i_q5}')
+            s_th14 = sp.Symbol(f's_th14_q1{i_q1}_q5{i_q5}', real=True)
+            c_th14 = sp.Symbol(f'c_th14_q1{i_q1}_q5{i_q5}', real=True)
+            s_q6   = sp.Symbol(f's_q6_q1{i_q1}_q5{i_q5}', real=True)
+            c_q6   = sp.Symbol(f'c_q6_q1{i_q1}_q5{i_q5}', real=True)
             raw += [(s_th14, s_th14_expr), (c_th14, c_th14_expr), (s_q6, s_q6_expr), (c_q6, c_q6_expr)]
 
             # d_inner uses th14 as atom — no blowup
             d_inner = R_01.T * p_06 - P[1] - _sym_rot(H[1], s_th14, c_th14) * P[4]
-            di0 = sp.Symbol(f'di0_q1{i_q1}_q5{i_q5}')
-            di1 = sp.Symbol(f'di1_q1{i_q1}_q5{i_q5}')
-            di2 = sp.Symbol(f'di2_q1{i_q1}_q5{i_q5}')
-            d3  = sp.Symbol(f'd3_q1{i_q1}_q5{i_q5}')
+            di0 = sp.Symbol(f'di0_q1{i_q1}_q5{i_q5}', real=True)
+            di1 = sp.Symbol(f'di1_q1{i_q1}_q5{i_q5}', real=True)
+            di2 = sp.Symbol(f'di2_q1{i_q1}_q5{i_q5}', real=True)
+            d3  = sp.Symbol(f'd3_q1{i_q1}_q5{i_q5}', real=True)
             d3_expr = sp.sqrt(d_inner[0]**2 + d_inner[1]**2 + d_inner[2]**2)
-            raw += [(di0, d_inner[0]), (di1, d_inner[1]),
-                    (di2, d_inner[2]), (d3, d3_expr)]
+            # raw += [(di0, d_inner[0]), (di1, d_inner[1]),
+            #         (di2, d_inner[2]), (d3, d3_expr)]
+            
             mid_syms[(i_q1, i_q5)] = ((s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, d3)
+            
+            lazy_sub_map[di0] = d_inner[0]
+            lazy_sub_map[di1] = d_inner[1]
+            lazy_sub_map[di2] = d_inner[2]
+            lazy_sub_map[d3] = d3_expr
+            
+            # d_inner = R_01.T * p_06 - P[1] - _sym_rot(H[1], s_th14, c_th14) * P[4]
+            # di0 = d_inner[0]
+            # di1 = d_inner[1]
+            # di2 = d_inner[2]
+            # d3_expr = sp.sqrt(d_inner[0]**2 + d_inner[1]**2 + d_inner[2]**2)
+            # d3  = d3_expr
+            
+            # mid_syms[(i_q1, i_q5)] = ((s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, d3)
 
     # ── q3 ────────────────────────────────────────────────────────────────────
     # _sp3 args are all rational + the d3 atom → polynomial in d3 after expand
@@ -328,10 +370,10 @@ def _derive_global(H_num, P_num):
         for i_q5 in range(2):
             *_, d3 = mid_syms[(i_q1, i_q5)]
             (s_t3_0_expr, c_t3_0_expr), (s_t3_1_expr, c_t3_1_expr) = _sp3_sincos(-P[3], P[2], H[1], d3)
-            s_t3_0 = sp.Symbol(f's_t3_0_q1{i_q1}_q5{i_q5}')
-            c_t3_0 = sp.Symbol(f'c_t3_0_q1{i_q1}_q5{i_q5}')
-            s_t3_1 = sp.Symbol(f's_t3_1_q1{i_q1}_q5{i_q5}')
-            c_t3_1 = sp.Symbol(f'c_t3_1_q1{i_q1}_q5{i_q5}')
+            s_t3_0 = sp.Symbol(f's_t3_0_q1{i_q1}_q5{i_q5}', real=True)
+            c_t3_0 = sp.Symbol(f'c_t3_0_q1{i_q1}_q5{i_q5}', real=True)
+            s_t3_1 = sp.Symbol(f's_t3_1_q1{i_q1}_q5{i_q5}', real=True)
+            c_t3_1 = sp.Symbol(f'c_t3_1_q1{i_q1}_q5{i_q5}', real=True)
             t3_syms[(i_q1, i_q5)] = ((s_t3_0, c_t3_0), (s_t3_1, c_t3_1))
             raw += [(s_t3_0, s_t3_0_expr), (c_t3_0, c_t3_0_expr), (s_t3_1, s_t3_1_expr), (c_t3_1, c_t3_1_expr)]
 
@@ -339,7 +381,7 @@ def _derive_global(H_num, P_num):
     branch_joints = []
     for i_q1, (s_t1, c_t1) in enumerate([(s_t1_0, c_t1_0), (s_t1_1, c_t1_1)]):
         for i_q5, (s_t5, c_t5) in enumerate(t5_syms[i_q1]):
-            (s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, _ = mid_syms[(i_q1, i_q5)] #############################################
+            (s_th14, c_th14), (s_q6, c_q6), di0, di1, di2, _ = mid_syms[(i_q1, i_q5)]
             d_inner_sym = sp.Matrix([di0, di1, di2])
             for i_q3, (s_t3, c_t3) in enumerate(t3_syms[(i_q1, i_q5)]):
                 s_q2_expr, c_q2_expr = _sp1_sincos(P[2] + _sym_rot(H[1], s_t3, c_t3) * P[3], d_inner_sym, H[1])
@@ -353,21 +395,40 @@ def _derive_global(H_num, P_num):
                 s_q4_expr = s_14_2 * c_t3 - c_14_2 * s_t3
                 c_q4_expr = c_14_2 * c_t3 + s_14_2 * s_t3
 
-                s_q2 = sp.Symbol(f's_q2_b{i_q1}{i_q5}{i_q3}')
-                c_q2 = sp.Symbol(f'c_q2_b{i_q1}{i_q5}{i_q3}')
-                s_q4 = sp.Symbol(f's_q4_b{i_q1}{i_q5}{i_q3}')
-                c_q4 = sp.Symbol(f'c_q4_b{i_q1}{i_q5}{i_q3}')
+                s_q2 = sp.Symbol(f's_q2_b{i_q1}{i_q5}{i_q3}', real=True)
+                c_q2 = sp.Symbol(f'c_q2_b{i_q1}{i_q5}{i_q3}', real=True)
+                s_q4 = sp.Symbol(f's_q4_b{i_q1}{i_q5}{i_q3}', real=True)
+                c_q4 = sp.Symbol(f'c_q4_b{i_q1}{i_q5}{i_q3}', real=True)
                 raw += [(s_q2, s_q2_expr), (c_q2, c_q2_expr), (s_q4, s_q4_expr), (c_q4, c_q4_expr)]
                 branch_joints.append((s_t1, c_t1, s_q2, c_q2, s_t3, c_t3, s_q4, c_q4, s_t5, c_t5, s_q6, c_q6))
 
     # ── ONE global CSE pass ───────────────────────────────────────────────────
     all_syms  = [s for s, _ in raw]
     all_exprs = [e for _, e in raw]
+
+    all_exprs = [sp.trigsimp(e) for e in all_exprs]
+    all_exprs = [sp.simplify(e) for e in all_exprs]
+    all_exprs = [sp.trigsimp(e) for e in all_exprs]
+
+    all_exprs = [e.subs(lazy_sub_map, simultaneous=True) for e in all_exprs]
+
+    # all_exprs = [sp.trigsimp(e) for e in all_exprs]
+    # all_exprs = [sp.simplify(e) for e in all_exprs]
+    # all_exprs = [sp.trigsimp(e) for e in all_exprs]
+
+    blacklist = set(all_syms) | set(input_syms)
+
+    # Define your inputs that should be "ignored" for constant-only folding
     print(f"  Running global CSE on {len(all_exprs)} expressions...")
-    global_repl, global_red = sp.cse(all_exprs, optimizations='basic')
+    print(f"{sum(sp.count_ops(e) for e in all_exprs)} total operations...")
+    const_repl, const_red = sp.cse(all_exprs, ignore=blacklist, optimizations='basic', symbols=sp.numbered_symbols('c'))
+    global_repl, global_red = sp.cse(const_red, optimizations='basic', symbols=sp.numbered_symbols('x'))
+    print(f"  Global CSE: {len(const_repl)} constant subexpressions extracted")
     print(f"  Global CSE: {len(global_repl)} shared subexpressions extracted")
 
-    return input_syms, all_syms, global_repl, global_red, branch_joints
+    # global_repl, global_red = sp.cse(all_exprs, optimizations='basic')
+
+    return input_syms, all_syms, const_repl, global_repl, global_red, branch_joints, param_map
 
 
 class _JnpPrinter(PythonCodePrinter):
@@ -399,8 +460,8 @@ class _JnpPrinter(PythonCodePrinter):
     def _print_Rational(self, expr):
         return repr(float(expr))
 
-def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
-               branch_joints, out_path):
+def _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global_red,
+               branch_joints, param_map, out_path):
     printer = _JnpPrinter()
 
     def emit(expr):
@@ -425,6 +486,17 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
         '',
     ]
 
+    # ── Robot Parameters (Constants) ──
+    for symbol, value in param_map.items():
+        lines.append(f"    {symbol} = {value}")
+    lines.append('')
+
+    # -- Constant replacements --
+    for sym, expr in const_repl:
+        lines.append(f'    {sym} = {emit(expr)}')
+    lines.append('')
+
+    # -- Actual runtime calculations --
     sym_names = [str(s) for s in input_syms]
     for i in range(3):
         for j in range(3):
@@ -444,8 +516,6 @@ def _emit_file(robot_name, input_syms, all_syms, global_repl, global_red,
     # for sym, red_expr in zip(all_syms, global_red):
     #     lines.append(f'    {sym} = {emit(red_expr)}')
     # lines.append('')
-
-    import re
 
     def get_max_x(sym) -> int:
         """
@@ -631,10 +701,10 @@ def generate(robot_name, out_dir=None):
     t0 = time.perf_counter()
 
     print("  Deriving symbolic IK (staged)...")
-    input_syms, all_syms, global_repl, global_red, branch_joints = _derive_global(H_num, P_num)
+    input_syms, all_syms, const_repl, global_repl, global_red, branch_joints, param_map = _derive_global(H_num, P_num)
     print(f"  Derivation done in {time.perf_counter()-t0:.1f}s")
 
-    _emit_file(robot_name, input_syms, all_syms, global_repl, global_red, branch_joints, out_path)
+    _emit_file(robot_name, input_syms, all_syms, const_repl, global_repl, global_red, branch_joints, param_map, out_path)
     _validate(robot_name, out_path)
 
     print(f"  Total: {time.perf_counter()-t0:.1f}s")
