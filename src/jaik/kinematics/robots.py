@@ -20,8 +20,12 @@ make_robot_from_dh.
 from typing import Callable
 import importlib
 import numpy as np
+import jax.numpy as jnp
+
 from jaik.kinematics.convention_conversions import dh_to_kin
 from jaik.kinematics.adjustments import adjust_kin_for_3p2i
+from jaik._numpy.fk import _fk as _fk_np
+from jaik._jax.fk import _fk as _fk_jax
 
 # ── robot parameter presets ───────────────────────────────────────────────────
 
@@ -281,7 +285,7 @@ def _make_jax_callables(kin, family):
     def ik(R_target, p_target):
         R_06 = R_target @ RT.T
         Q, _ = _solver(R_06, p_target, H, P)
-        valid = ~__import__('jax').numpy.isnan(Q).any(axis=0)
+        valid = ~jnp.isnan(Q).any(axis=0)
         return Q, valid
 
     return fk, ik
@@ -289,8 +293,6 @@ def _make_jax_callables(kin, family):
 
 def _make_cse_callables(kin, robot_name):
     """CSE-generated solver for a specific named robot."""
-    import jax.numpy as jnp
-    from jaik._jax.fk import _fk as _fk_jax
 
     module_name = f"jaik._jax._generated.ik_{robot_name.lower()}"
     mod = importlib.import_module(module_name)
@@ -314,8 +316,6 @@ def _make_cse_callables(kin, robot_name):
 
 def _make_cse_sincos_callables(kin, robot_name):
     """CSE-generated solver for a specific named robot."""
-    import jax.numpy as jnp
-    from jaik._jax.fk import _fk as _fk_jax
 
     module_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos"
     mod = importlib.import_module(module_name)
@@ -339,7 +339,6 @@ def _make_cse_sincos_callables(kin, robot_name):
 
 def _make_numpy_callables(kin, family):
     """Numpy solver for debugging."""
-    from jaik._numpy.fk import _fk as _fk_np
 
     if family == "3p2i":
         from jaik._numpy.ik_3p2i import ik_3_parallel_2_intersecting as _solver
