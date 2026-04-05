@@ -1,6 +1,8 @@
 # Jaik
 JAX analytic inverse kinematics: A fast solver for robots. Currently implemented are UR-robot arms, more will follow. 
 
+With vmap batches of 4k on a A100 it reaches ~15M IK solves/s, saturating at ~500M/s at batch sizes of 4M+.
+
 ## Installation
 
 ```
@@ -25,8 +27,7 @@ q0 = q * 1.1
 q, branch = ik_closest(R, p, q0)
 ```
 
-Three different solvers are offered, selectable in `make_robot`: "jax", "numpy", and "numba" (default: `solver="jax"`). Jax is the standard one here. Numpy is more or less a translation of the [IK-Geo](https://github.com/rpiRobotics/ik-geo/tree/main/matlab) matlab code, useful for debugging. 
-Numba is an optional jit-compiled solver that uses numpy and not jax. It beats jax in performance for small batches. Install with `pip install "jaik[numba]"`
+There is an additional optional numba backend installable with `pip install "jaik[numba]"`. Then use it with `jaik.make_robot(name, solver="numba")`, `solver="jax"` by default. For single calls for small batches, numba is significantly faster than jax. 
 
 The solvers avoid trigonometric functions where possible. If the first thing you do with the returned joint angles is `jnp.sin(q), jnp.cos(q)`, we can save us both some time by using the keyword `sincos=True` in `make_robot`. This returns two values per joint as `sin(q), cos(q)`. For UR robots, this avoids using trigonometric functions altogether. 
 
@@ -40,12 +41,23 @@ By default it expects a (3,3) rotation matrix and (3,) vector as input (`format=
 
 ## Benchmarks
 
-The benchmarks were done on a Lenovo ThinkPad (Intel Core Ultra 7 265U, 32 GB RAM, JAX on CPU) and a cluster (...)
-- CPU: Intel Xeon E5-2698 v4 @ 2.20 GHz (40 cores allocated)
+The benchmarks were done on a Lenovo ThinkPad:
+- CPU: Intel Core Ultra 7 265U, 32 GB RAM
+And on a cluster:
+- CPU: Intel Xeon E5-2698 v4 @ 2.20 GHz (40 cores, 32GB RAM allocated)
 - GPU: NVIDIA A100-SXM4-40GB
-Im unsure how much of the measured time is overhead or if anything got "compiled away", some guidance there would be appreciated. 
+Im unsure how much of the measured time is python-overhead or if anything got "compiled away", some guidance there would be appreciated. 
 
-...plots...
+<p>
+  <img src="benchmarks/benchmark_laptop_ik.png" width="49%"/>
+  <img src="benchmarks/benchmark_cluster_ik.png" width="49%"/>
+</p>
+
+By using `sincos=True` which avoids the `atan2` calls by returning `sin(q), cos(q)` (this might not be ideal in every use-case):
+<p>
+  <img src="benchmarks/benchmark_sincos_laptop_ik.png" width="49%"/>
+  <img src="benchmarks/benchmark_sincos_cluster_ik.png" width="49%"/>
+</p>
 
 ## Some examples
 
