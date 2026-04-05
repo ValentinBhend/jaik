@@ -46,7 +46,6 @@ The benchmarks were done on a Lenovo ThinkPad:
 And on a cluster:
 - CPU: Intel Xeon E5-2698 v4 @ 2.20 GHz (40 cores, 32GB RAM allocated)
 - GPU: NVIDIA A100-SXM4-40GB
-Im unsure how much of the measured time is python-overhead or if anything got "compiled away", some guidance there would be appreciated. 
 
 <p>
   <img src="benchmarks/benchmark_laptop_ik.png" width="49%"/>
