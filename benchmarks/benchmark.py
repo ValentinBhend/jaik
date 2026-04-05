@@ -17,7 +17,8 @@ import numpy as np
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-BATCH_SIZES = [4**i for i in range(9)]
+BATCH_SIZES_JAX = [4**i for i in range(12)]
+BATCH_SIZES_NUMBA = [4**i for i in range(8)]
 N_REPEAT    = 200       # outer timing loops for single-call benchmarks
 N_WARMUP    = 50        # calls to trigger JIT before timing
 
@@ -113,7 +114,7 @@ def bench_jax(robot, results, n_warmup=N_WARMUP):
         fk_vmap = jax.jit(jax.vmap(fk),      backend=dev_name)
         ik_vmap = jax.jit(jax.vmap(ik_full), backend=dev_name)
 
-        for B in BATCH_SIZES:
+        for B in BATCH_SIZES_JAX:
             q_b  = jnp.array(_rand_q(B), device=device)
             Rs_b = jnp.array(_rand_pose(B)[0], device=device)
             ps_b = jnp.array(_rand_pose(B)[1], device=device)
@@ -215,7 +216,7 @@ def bench_numba(robot, results, n_warmup=N_WARMUP):
             valids[i] = v
         return Qs, valids
 
-    for B in BATCH_SIZES:
+    for B in BATCH_SIZES_NUMBA:
         q_b  = _rand_q(B)
         Rs_b, ps_b = _rand_pose(B)
 
@@ -243,7 +244,7 @@ def bench_numba(robot, results, n_warmup=N_WARMUP):
 
 def _print_table(results):
     solvers = list(results.keys())
-    sizes   = [1] + BATCH_SIZES
+    sizes   = [1] + BATCH_SIZES_JAX
     print("\n" + "═" * 80)
     print("  SUMMARY — µs per call (median)")
     print("═" * 80)
@@ -273,7 +274,7 @@ def main():
 
     import jaik
     print(f"\njaik benchmark — {args.robot}")
-    print(f"Batch sizes: {BATCH_SIZES}   Repeats: {N_REPEAT}   Warmup: {args.n_warmup}\n")
+    print(f"Batch sizes: Jax: {BATCH_SIZES_JAX} Numba {BATCH_SIZES_NUMBA}   Repeats: {N_REPEAT}   Warmup: {args.n_warmup}\n")
 
     results = defaultdict(lambda: {"fk": {}, "ik": {}})
 
@@ -285,7 +286,7 @@ def main():
     numba_robot = jaik.make_robot(args.robot, solver="numba")
     bench_numba(numba_robot, results, n_warmup=args.n_warmup)
 
-    _print_table(results)
+    # _print_table(results)
 
     if args.save:
         # convert defaultdict for json serialization

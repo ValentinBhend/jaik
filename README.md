@@ -41,6 +41,8 @@ By default it expects a (3,3) rotation matrix and (3,) vector as input (`format=
 ## Benchmarks
 
 The benchmarks were done on a Lenovo ThinkPad (Intel Core Ultra 7 265U, 32 GB RAM, JAX on CPU) and a cluster (...)
+- CPU: Intel Xeon E5-2698 v4 @ 2.20 GHz (40 cores allocated)
+- GPU: NVIDIA A100-SXM4-40GB
 Im unsure how much of the measured time is overhead or if anything got "compiled away", some guidance there would be appreciated. 
 
 ...plots...
