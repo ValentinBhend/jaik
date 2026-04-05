@@ -21,145 +21,20 @@ from typing import Callable
 import importlib
 import numpy as np
 import jax.numpy as jnp
+import os
 
 from jaik.kinematics.convention_conversions import dh_to_kin
 from jaik.kinematics.adjustments import adjust_kin_for_3p2i
-from jaik._numpy.fk import _fk as _fk_np
-from jaik._jax.fk import _fk as _fk_jax
 
-# ── robot parameter presets ───────────────────────────────────────────────────
+from .UR_params import _UR_ALPHA, _UR_PARAMS
 
-# All UR-type robots share the same alpha pattern
-_UR_ALPHA = np.array([np.pi/2, 0, 0, np.pi/2, -np.pi/2, 0])
-
-# Named presets: (a2, a3, d1, d4, d5, d6) in meters, signed per UR convention
-# Source: Universal Robots support articles
-#   https://www.universal-robots.com/articles/ur/application-installation/
-#   dh-parameters-for-calculations-of-kinematics-and-dynamics/
-_UR_PARAMS = {
-    # e-series
-    "UR3e":    dict(a2=-0.24355,  a3=-0.2132,   d1=0.15185,  d4=0.13105,  d5=0.08535, d6=0.0921),
-    "UR5e":    dict(a2=-0.425,    a3=-0.3922,   d1=0.1625,   d4=0.1333,   d5=0.0997,  d6=0.0996),
-    "UR7e":    dict(a2=-0.425,    a3=-0.3922,   d1=0.1625,   d4=0.1333,   d5=0.0997,  d6=0.0996),
-    "UR10e":   dict(a2=-0.6127,   a3=-0.57155,  d1=0.1807,   d4=0.17415,  d5=0.11985, d6=0.11655),
-    "UR12e":   dict(a2=-0.6127,   a3=-0.57155,  d1=0.1807,   d4=0.17415,  d5=0.11985, d6=0.11655),
-    "UR16e":   dict(a2=-0.4784,   a3=-0.36,     d1=0.1807,   d4=0.17415,  d5=0.11985, d6=0.11655),
-    "UR20":    dict(a2=-0.8620,   a3=-0.7287,   d1=0.2363,   d4=0.2010,   d5=0.1593,  d6=0.1543),
-    "UR30":    dict(a2=-0.6370,   a3=-0.5037,   d1=0.2363,   d4=0.2010,   d5=0.1593,  d6=0.1543),
-    # CB3 series
-    "UR3":     dict(a2=-0.24365,  a3=-0.21325,  d1=0.1519,   d4=0.11235,  d5=0.08535, d6=0.0819),
-    "UR5":     dict(a2=-0.425,    a3=-0.39225,  d1=0.089159, d4=0.10915,  d5=0.09465, d6=0.0823),
-    "UR10":    dict(a2=-0.612,    a3=-0.5723,   d1=0.1273,   d4=0.163941, d5=0.1157,  d6=0.0922),
-    # heavy payload
-    "UR8long": dict(a2=-0.8989,   a3=-0.7149,   d1=0.2186,   d4=0.1824,   d5=0.1361,  d6=0.1434),
-    "UR15":    dict(a2=-0.6475,   a3=-0.5164,   d1=0.2186,   d4=0.1824,   d5=0.1361,  d6=0.1434),
-    "UR18":    dict(a2=-0.475,    a3=-0.3389,   d1=0.2186,   d4=0.1824,   d5=0.1361,  d6=0.1434),
-}
-
-# Standard UR tool frame convention — matches what the teach pendant reports.
-# Rx(90°): z-axis pointing forward along the tool, y-axis up.
-_UR_R6T = np.array([[1, 0,  0],
-                    [0, 0, -1],
-                    [0, 1,  0]], dtype=float)
-
-# Solvers always available regardless of robot
-_BASE_SOLVERS = ["auto", "general", "numpy"]
 
 
 # ── public API ────────────────────────────────────────────────────────────────
 
-def make_robot(
-    name:   str,
-    solver: str = "auto",
-    R_6T:   np.ndarray = None,
-) -> tuple[Callable, Callable]:
-    """
-    Return (fk, ik) callables for a named UR robot.
-
-    Args:
-        name:   Robot name, e.g. "UR10e". See available_robots().
-        solver: Which IK solver to use:
-                  "auto"    — fastest available (default)
-                  "cse"     — CSE-generated, fast, robot-specific
-                  "general" — IK-Geo general JAX solver
-                  "numpy"   — numpy backend, for debugging
-                See robot_infos(name)["available_solvers"] for what is
-                available for a specific robot.
-        R_6T:   Additional tool frame rotation applied on top of the standard
-                UR convention (Rx 90°). Pass np.eye(3) to remove the default
-                UR tool frame and get raw joint-frame output.
-
-    Returns:
-        fk: q -> (R, p)            forward kinematics
-        ik: (R, p) -> (Q, valid)   IK, all 8 branches
-                                   Q:     (6, 8) joint angles, NaN = infeasible
-                                   valid: (8,)   bool mask of feasible branches
-
-    Raises:
-        ValueError: if name, solver, or combination is not supported.
-    """
-    if name not in _UR_PARAMS:
-        raise ValueError(
-            f"Unknown robot '{name}'. "
-            f"Available: {sorted(_UR_PARAMS.keys())}.\n"
-            f"For custom parameters use make_robot_from_dh()."
-        )
-    p = _UR_PARAMS[name]
-    a = np.array([0, p["a2"], p["a3"], 0, 0, 0])
-    d = np.array([p["d1"], 0, 0, p["d4"], p["d5"], p["d6"]])
-    r6t = _UR_R6T if R_6T is None else _UR_R6T @ np.asarray(R_6T, dtype=float)
-
-    return _build_callables(
-        _UR_ALPHA, a, d, r6t,
-        solver=solver,
-        family="3p2i",
-        robot_name=name,
-    )
-
-
-def make_robot_from_dh(
-    alpha:  np.ndarray,
-    a:      np.ndarray,
-    d:      np.ndarray,
-    solver: str = "auto",
-    R_6T:   np.ndarray = None,
-    family: str = "3p2i",
-) -> tuple[Callable, Callable]:
-    """
-    Return (fk, ik) callables from raw DH parameters.
-
-    Useful when DH parameters come from a URDF parser (e.g. pyroki, yourdfpy)
-    or from a robot's calibration file.
-
-    Args:
-        alpha:  (6,) link twist angles [rad]
-        a:      (6,) link lengths [m], signed per DH convention
-        d:      (6,) link offsets [m]
-        solver: "auto", "general", or "numpy". "cse" is not available for
-                custom robots since it requires pre-generated code.
-        R_6T:   Optional (3,3) tool frame rotation. Defaults to identity.
-        family: Kinematic family. Currently only "3p2i" is supported.
-
-    Returns:
-        fk: q -> (R, p)
-        ik: (R, p) -> (Q, valid)
-
-    Raises:
-        ValueError: if family or solver is not supported.
-    """
-    if family != "3p2i":
-        raise ValueError(
-            f"Unsupported kinematic family '{family}'. "
-            f"Currently supported: '3p2i'."
-        )
-    r6t = np.asarray(R_6T, dtype=float) if R_6T is not None else np.eye(3)
-    return _build_callables(alpha, a, d, r6t, solver=solver,
-                            family=family, robot_name=None)
-
-
 def available_robots() -> list:
     """Return sorted list of available named robot presets."""
-    return sorted(_UR_PARAMS.keys())
+    return sorted(k.lower() for k in _UR_PARAMS)
 
 
 def robot_infos(name: str) -> dict:
@@ -181,237 +56,279 @@ def robot_infos(name: str) -> dict:
             f"Unknown robot '{name}'. "
             f"Available: {sorted(_UR_PARAMS.keys())}."
         )
-    solvers = list(_BASE_SOLVERS)
-    if _has_cse(name):
-        solvers.insert(1, "cse")  # after "auto", before "general"
     return {
-        "available_solvers": solvers,
+        "available_solvers": "TODO..",
     }
 
 
+def make_robot(
+    robot:   str | dict | os.PathLike,
+    solver: str = "jax",
+    format: str = "Rp",
+    sincos: bool = False,
+    R_6T:   np.ndarray | None = None,
+) -> tuple[Callable, Callable, Callable]:
+    """
+    Return (fk, ik_full, ik_closest) callables for a named UR robot.
+
+    Args:
+        name:   Robot name, e.g. "UR10e". See available_robots().
+        ...
+
+    Returns:
+        fk: q -> (R, p)            forward kinematics
+        ik_full: (R, p) -> (Q, valid)   IK, all 8 branches
+                                   Q:     (6, 8) joint angles, NaN = infeasible
+                                   valid: (8,)   bool mask of feasible branches
+        ik_closest: (R, p, q0) -> (q, branch)   IK, selects cloeset branch
+                                   q:     (6,) joint angles, NaN = infeasible
+                                   branch: integer branch index
+    """
+
+    # TODO temp for UR robots..
+    R_6T = np.array([[1, 0,  0], [0, 0, -1], [0, 1,  0]], dtype=float)
+
+    kin, codegen_id = _resolve_robot(robot)
+    _fk, _ik_full = _load_solvers(solver, kin, codegen_id)
+    fk, ik_full, ik_closest = _wrap_solvers(_fk, _ik_full, solver, format, sincos, R_6T)
+    return fk, ik_full, ik_closest
+
 # ── internal ──────────────────────────────────────────────────────────────────
+def _resolve_robot(robot: str | dict | os.PathLike):
+    if isinstance(robot, str):
+        if robot.endswith(".urdf") or os.path.exists(robot):
+            kin, codegen_id = _resolve_urdf(robot)
+        else:
+            kin, codegen_id = _resolve_named(robot)
+    elif isinstance(robot, dict):
+        kin, codegen_id = _resolve_custom(robot)
+    elif isinstance(robot, os.PathLike):
+        kin, codegen_id = _resolve_urdf(robot)
+    else:
+        raise ValueError (f"Robot input {robot} with type {type(robot)} could not be resolved")
+    return kin, codegen_id
 
-def _has_cse(name: str) -> bool:
-    """Check if a CSE-generated solver exists for this robot."""
-    module_name = f"jaik._jax._generated.ik_{name.lower()}"
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        return False
+def _resolve_custom(definition: dict):
+    raise NotImplementedError
 
+def _resolve_urdf(path: str):
+    raise NotImplementedError
 
-def _resolve_solver(solver: str, robot_name: str | None) -> str:
-    """Resolve 'auto' to the best available concrete solver."""
-    if solver != "auto":
-        return solver
-    if robot_name is not None and _has_cse(robot_name):
-        return "cse"
-    return "general"
+def _resolve_named(name: str):
+    if name.lower() in available_robots():
+        if name.lower() in (k.lower() for k in _UR_PARAMS):
+            return _resolve_UR(name)
+        else:
+            raise NotImplementedError
+    else:
+        raise ValueError (f"Robot name {name} not known. Currently available robots by name are {available_robots()}")
 
+def _resolve_UR(name):
+    p = next((v for k, v in _UR_PARAMS.items() if k.lower() == name.lower()), None)
+    
+    alpha = _UR_ALPHA
+    a = np.array([0, p["a2"], p["a3"], 0, 0, 0])
+    d = np.array([p["d1"], 0, 0, p["d4"], p["d5"], p["d6"]])
 
-def _build_kin(alpha, a, d, R_6T, family):
-    """Build and adjust a raw kin dict."""
     kin = dh_to_kin(alpha, a, d)
-    if family == "3p2i":
-        kin = adjust_kin_for_3p2i(kin)
-    kin['RT'] = np.asarray(R_6T, dtype=float)
-    return kin
+    kin = adjust_kin_for_3p2i(kin)
 
+    codegen_id = name.lower()
+    return kin, codegen_id
 
-def _build_callables(alpha, a, d, R_6T, solver, family, robot_name):
-    resolved = _resolve_solver(solver, robot_name)
+def _load_solvers(solver, kin, codegen_id):
+    module_name = f"jaik._{solver}._generated.{codegen_id}"
+    if importlib.util.find_spec(module_name) is None:
+        print(f"Generating new sympy cse for {solver}. Might take a few minutes (only once, then saved)")
+        _generate_new(solver, kin, module_name, codegen_id)
+    _fk, _ik_full = _load_generated(module_name)
+    return _fk, _ik_full
 
-    if resolved == "cse":
-        if robot_name is None:
-            raise ValueError(
-                "solver='cse' requires a named robot — use make_robot() "
-                "instead of make_robot_from_dh()."
-            )
-        if not _has_cse(robot_name):
-            raise ValueError(
-                f"No CSE solver available for '{robot_name}'. "
-                f"Run codegen first, or use solver='auto' or 'general'."
-            )
+def _load_generated(module_name):
+    module = importlib.import_module(module_name)
+    _fk = getattr(module, "fk")
+    _ik_full = getattr(module, "ik_full")
+    return _fk, _ik_full
 
-    if resolved not in ("cse", "cse_sincos", "general", "numpy", "numba"):
+def _generate_new(solver, kin, module_name, codegen_id):
+    if solver == "numpy":
         raise ValueError(
-            f"Unknown solver '{solver}'. "
-            f"Choose from: 'auto', 'cse', 'general', 'numpy'."
+            "solver='numpy' not available, it has no codegen — those are hand-written reference implementations. "
+            "Use solver='jax' or solver='numba'."
         )
-
-    if resolved == "cse" and robot_name is None:
-        raise ValueError(
-            "solver='cse' requires a named robot. "
-            "Use make_robot() instead of make_robot_from_dh()."
-        )
-
-    if resolved == "cse" and not _has_cse(robot_name):
-        raise ValueError(
-            f"No CSE solver available for '{robot_name}'. "
-            f"Run codegen first, or use solver='auto' or 'general'."
-        )
-
-    kin = _build_kin(alpha, a, d, R_6T, family)
-
-    if resolved == "numpy":
-        return _make_numpy_callables(kin, family)
-    elif resolved == "cse":
-        return _make_cse_callables(kin, robot_name)
-    elif resolved == "cse_sincos":
-        return _make_cse_sincos_callables(kin, robot_name)
-    elif resolved == "numba":
-        return _make_numba_callables(kin, robot_name)
+    from jaik.codegen.generate import generate
+    if codegen_id in available_robots():
+        generate(solver, kin, module_name, codegen_id)
     else:
-        return _make_jax_callables(kin, family)
+        raise NotImplementedError
 
-
-def _make_jax_callables(kin, family):
-    """JAX general solver (IK-Geo 3p2i)."""
-    import jax.numpy as jnp
-    from jaik._jax.fk import _fk as _fk_jax
-
-    if family == "3p2i":
-        from jaik._jax.ik_3p2i import ik_3_parallel_2_intersecting as _solver
+def _wrap_solvers(_fk, _ik_full, solver, format, sincos, R_6T):
+    if solver == "jax":
+        fk, ik_full, ik_closest = _wrap_solver_jax(_fk, _ik_full, format, sincos, R_6T)
+    elif solver == "numpy":
+        fk, ik_full, ik_closest = _wrap_solver_numpy(_fk, _ik_full, format, sincos, R_6T)
+    elif solver == "numba":
+        fk, ik_full, ik_closest = _wrap_solver_numba(_fk, _ik_full, format, sincos, R_6T)
     else:
-        raise ValueError(f"No JAX solver for family '{family}'.")
-
-    H  = jnp.asarray(kin['H'])
-    P  = jnp.asarray(kin['P'])
-    RT = jnp.asarray(kin['RT'])
-
-    def fk(q):
-        R, p = _fk_jax(q, H, P)
-        return R @ RT, p
-
-    def ik_full(R_target, p_target):
-        R_06 = R_target @ RT.T
-        Q, _ = _solver(R_06, p_target, H, P)
-        valid = ~jnp.isnan(Q).any(axis=0)
-        return Q, valid
+        raise ValueError
     
-    def ik_closest(R_target, p_target, q_ref, weights=None):
-        raise NotImplementedError
-
     return fk, ik_full, ik_closest
 
-
-def _make_cse_callables(kin, robot_name):
-    """CSE-generated solver for a specific named robot."""
-
-    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}"
-    mod = importlib.import_module(module_name)
-    fn_name = f"ik_{robot_name.lower()}"
-    _solver = getattr(mod, fn_name)
-
-    H  = jnp.asarray(kin['H'])
-    P  = jnp.asarray(kin['P'])
-    RT = jnp.asarray(kin['RT'])
-
-    def fk(q):
-        R, p = _fk_jax(q, H, P)
+def _wrap_solver_jax(_fk, _ik_full, format, sincos, R_6T):
+    RT = jnp.asarray(R_6T) if R_6T is not None else jnp.eye(3)
+    def fk(sq, cq):
+        R, p = _fk(sq, cq)
         return R @ RT, p
-
-    def ik_full(R_target, p_target):
-        R_06 = R_target @ RT.T
-        return _solver(R_06, p_target)
+    def ik_full(R, p):
+        R_06 = R @ RT.T
+        sq, cq, valid = _ik_full(R_06, p)
+        return sq, cq, valid
     
-    def ik_closest(R_target, p_target, q_ref, weights=None):
-        raise NotImplementedError
+    if not sincos:
+        fk_orig = fk
+        ik_full_orig = ik_full
+        def fk(q):
+            sq, cq = jnp.sin(q), jnp.cos(q)
+            return fk_orig(sq, cq)
+        def ik_full(R, p):
+            sq, cq, valid = ik_full_orig(R, p)
+            q = jnp.atan2(sq, cq)
+            return q, valid
+    
+    if format == "Rp":
+        pass
+    elif format == "T":
+        fk_orig = fk
+        ik_full_orig = ik_full
+        def fk(*args):
+            R, p = fk_orig(*args)
+            T = jnp.concatenate([
+                jnp.concatenate([R, p[:,None]], axis=1),
+                jnp.array([[0., 0., 0., 1.]])
+            ], axis=0)
+            return T
+        def ik_full(T):
+            R = T[:3,:3]
+            p = T[:3,3]
+            return ik_full_orig(R, p)
+    else:
+        raise ValueError
 
+    def ik_closest():
+        raise NotImplementedError
+    
     return fk, ik_full, ik_closest
 
-
-def _make_cse_sincos_callables(kin, robot_name):
-    """CSE-generated solver for a specific named robot."""
-
-    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos"
-    mod = importlib.import_module(module_name)
-    fn_name = f"ik_{robot_name.lower()}"
-    _solver = getattr(mod, fn_name)
-
-    H  = jnp.asarray(kin['H'])
-    P  = jnp.asarray(kin['P'])
-    RT = jnp.asarray(kin['RT'])
-
-    def fk(q):
-        R, p = _fk_jax(q, H, P)
+def _wrap_solver_numpy(_fk, _ik_full, format, sincos, R_6T):
+    RT = np.asarray(R_6T)
+    def fk(sq, cq):
+        R, p = _fk(sq, cq)
         return R @ RT, p
-
-    def ik_full(R_target, p_target):
-        R_06 = R_target @ RT.T
-        return _solver(R_06, p_target)
+    def ik_full(R, p):
+        R_06 = R @ RT.T
+        sq, cq, valid = _ik_full(R_06, p)
+        return sq, cq, valid
     
-    def ik_closest(R_target, p_target, q_ref, weights=None):
+    if not sincos:
+        fk_orig = fk
+        ik_full_orig = ik_full
+        def fk(q):
+            sq, cq = np.sin(q), np.cos(q)
+            return fk_orig(sq, cq)
+        def ik_full(R, p):
+            sq, cq, valid = ik_full_orig(R, p)
+            q = np.arctan2(sq, cq)
+            return q, valid
+    
+    if format == "Rp":
+        pass
+    elif format == "T":
+        fk_orig = fk
+        ik_full_orig = ik_full
+        def fk(*args):
+            R, p = fk_orig(*args)
+            T = np.block([
+                [R, p[:,None]],
+                [np.array([[0., 0., 0., 1.]])]
+            ])
+            return T
+        def ik_full(T):
+            R = T[:3,:3]
+            p = T[:3,3]
+            return ik_full_orig(R, p)
+    else:
+        raise ValueError
+    
+    def ik_closest():
         raise NotImplementedError
-
+    
     return fk, ik_full, ik_closest
 
+def _wrap_solver_numba(_fk, _ik_full, format, sincos, R_6T):
+    try:
+        from numba import njit
+    except ImportError:
+        raise ImportError(
+            "numba is required for solver='numba'. "
+            "Install it with: pip install 'jaik[numba]'"
+        ) from None
+    
+    RT = np.asarray(R_6T)
 
-def _make_numba_callables(kin, robot_name):
-    """CSE-generated solver for a specific named robot."""
-    from numba import njit # TODO emit message to install optional if it fails..
-
-    module_name = f"jaik._jax._generated.ik_{robot_name.lower()}_sincos_numba"
-    mod = importlib.import_module(module_name)
-    fn_name = f"ik_{robot_name.lower()}"
-    _solver = getattr(mod, fn_name)
-
-    H  = np.asarray(kin['H'], dtype=np.float64)
-    P  = np.asarray(kin['P'], dtype=np.float64)
-    RT = np.asarray(kin['RT'], dtype=np.float64)
-
-    def fk(q):
-        R, p = _fk_jax(q, H, P)
+    @njit
+    def _fk_Rp_sincos(sq, cq):
+        R, p = _fk(sq, cq)
         return R @ RT, p
 
     @njit
-    def ik_full(R_target, p_target):
-        # R_06 = R_target @ RT.T
-        # return _solver(R_06, p_target)
+    def _fk_Rp(q):
+        sq, cq = np.sin(q), np.cos(q)
+        return _fk_Rp_sincos(sq, cq)
 
-        r00 = R_target[0,0]*RT[0,0] + R_target[0,1]*RT[0,1] + R_target[0,2]*RT[0,2]
-        r01 = R_target[0,0]*RT[1,0] + R_target[0,1]*RT[1,1] + R_target[0,2]*RT[1,2]
-        r02 = R_target[0,0]*RT[2,0] + R_target[0,1]*RT[2,1] + R_target[0,2]*RT[2,2]
+    @njit
+    def _fk_T_sincos(sq, cq):
+        R, p = _fk_Rp_sincos(sq, cq)
+        T = np.empty((4, 4))
+        T[:3, :3] = R
+        T[:3, 3]  = p
+        T[3, :3]  = 0.
+        T[3, 3]   = 1.
+        return T
 
-        r10 = R_target[1,0]*RT[0,0] + R_target[1,1]*RT[0,1] + R_target[1,2]*RT[0,2]
-        r11 = R_target[1,0]*RT[1,0] + R_target[1,1]*RT[1,1] + R_target[1,2]*RT[1,2]
-        r12 = R_target[1,0]*RT[2,0] + R_target[1,1]*RT[2,1] + R_target[1,2]*RT[2,2]
+    @njit
+    def _fk_T(q):
+        sq, cq = np.sin(q), np.cos(q)
+        return _fk_T_sincos(sq, cq)
 
-        r20 = R_target[2,0]*RT[0,0] + R_target[2,1]*RT[0,1] + R_target[2,2]*RT[0,2]
-        r21 = R_target[2,0]*RT[1,0] + R_target[2,1]*RT[1,1] + R_target[2,2]*RT[1,2]
-        r22 = R_target[2,0]*RT[2,0] + R_target[2,1]*RT[2,1] + R_target[2,2]*RT[2,2]
-        p1, p2, p3 = p_target
-        return _solver(r00, r01, r02, r10, r11, r12, r20, r21, r22, p1, p2, p3)
-    
-    def ik_closest(R_target, p_target, q_ref, weights=None):
+    @njit
+    def _ik_full_sincos(R, p):
+        R_06 = R @ RT.T
+        sq, cq, valid = _ik_full(R_06, p)
+        return sq, cq, valid
+
+    @njit
+    def _ik_full_q(R, p):
+        sq, cq, valid = _ik_full_sincos(R, p)
+        return np.arctan2(sq, cq), valid
+
+    @njit
+    def _ik_full_T_sincos(T):
+        return _ik_full_sincos(T[:3, :3], T[:3, 3])
+
+    @njit
+    def _ik_full_T_q(T):
+        return _ik_full_q(T[:3, :3], T[:3, 3])
+
+    def ik_closest():
         raise NotImplementedError
 
-    return fk, ik_full, ik_closest
-
-
-def _make_numpy_callables(kin, family):
-    """Numpy solver for debugging."""
-
-    if family == "3p2i":
-        from jaik._numpy.ik_3p2i import ik_3_parallel_2_intersecting as _solver
+    if format == "Rp" and sincos:
+        return _fk_Rp_sincos, _ik_full_sincos, ik_closest
+    elif format == "Rp" and not sincos:
+        return _fk_Rp, _ik_full_q, ik_closest
+    elif format == "T" and sincos:
+        return _fk_T_sincos, _ik_full_T_sincos, ik_closest
+    elif format == "T" and not sincos:
+        return _fk_T, _ik_full_T_q, ik_closest
     else:
-        raise ValueError(f"No numpy solver for family '{family}'.")
-
-    RT = kin['RT']
-
-    def fk(q):
-        R, p = _fk_np(q, kin)
-        return R @ RT, p
-
-    def ik_full(R_target, p_target):
-        R_06 = R_target @ RT.T
-        Q, is_LS = _solver(R_06, p_target, kin)
-        # convert is_LS to valid mask for API consistency
-        valid = ~is_LS.any(axis=0)
-        return Q, valid
-    
-    def ik_closest(R_target, p_target, q_ref, weights=None):
-        raise NotImplementedError
-
-    return fk, ik_full, ik_closest
+        raise ValueError(f"Unknown format='{format}'")

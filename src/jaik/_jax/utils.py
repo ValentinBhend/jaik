@@ -7,15 +7,14 @@ from beartype import beartype
 # @jaxtyped(typechecker=beartype)
 def _rot(
     k: Float[Array, "3"],
-    theta: Float[Array, ""],
+    st: Float[Array, ""],
+    ct: Float[Array, ""],
 ) -> Float[Array, "3 3"]:
     """
     Rodrigues rotation matrix: rotate by theta around unit axis k.
 
     R = I + sin(theta) [k]× + (1 - cos(theta)) [k]×²
     """
-    ct = jnp.cos(theta)
-    st = jnp.sin(theta)
     kx, ky, kz = k[0], k[1], k[2]
 
     return jnp.array([

@@ -31,7 +31,7 @@ def dh_to_kin(alpha_vec, a_vec, d_vec):
         # Rotate by alpha around x_{i-1}
         R = _rot(R[:, 0], alpha_vec[i]) @ R
         
-        if i == N - 1: # TODO not sure why it does it twice..
+        if i == N - 1:
             RT = _rot(R[:, 0], alpha_vec[i])
         else:
             H[:, i + 1] = R[:, 2]  # joint axis is z after rotation

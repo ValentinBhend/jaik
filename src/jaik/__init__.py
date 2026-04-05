@@ -1,1 +1,1 @@
-from jaik.kinematics.robots import make_robot, make_robot_from_dh, available_robots, robot_infos
+from jaik.kinematics.robots import make_robot, available_robots, robot_infos
