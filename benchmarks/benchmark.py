@@ -62,6 +62,7 @@ def _timer(fn, n_repeat):
         times.append(time.perf_counter() - t0)
     return float(np.median(times)) * 1e6
 
+
 # ── JAX benchmarks ────────────────────────────────────────────────────────────
 
 def bench_jax(robot, results, n_warmup=N_WARMUP):
@@ -94,16 +95,52 @@ def bench_jax(robot, results, n_warmup=N_WARMUP):
                 else [x.block_until_ready() for x in jax.tree_util.tree_leaves(fk_jit(q_s))]
             [x.block_until_ready() for x in jax.tree_util.tree_leaves(ik_jit(R_s, p_s))]
 
-        def _fk_single():
-            R, p = fk_jit(q_s)
-            R.block_until_ready()
+        q_pool = jnp.array(_rand_q(N_REPEAT), device=device)
 
-        def _ik_single():
-            Q, v = ik_jit(R_s, p_s)
-            Q.block_until_ready()
+        def _fk_single_fair():
+            times = []
+            for i in range(N_REPEAT):
+                # 2. Grab a unique row each time
+                q_input = q_pool[i] 
+                
+                t0 = time.perf_counter()
+                R, p = fk_jit(q_input)
+                R.block_until_ready()
+                times.append(time.perf_counter() - t0)
+                
+            return float(np.median(times)) * 1e6
 
-        t_fk = _timer(_fk_single, N_REPEAT)
-        t_ik = _timer(_ik_single, N_REPEAT)
+        # def _fk_single():
+        #     R, p = fk_jit(q_s)
+        #     R.block_until_ready()
+
+        # def _ik_single():
+        #     Q, v = ik_jit(R_s, p_s)
+        #     Q.block_until_ready()
+
+        # 1. Pre-allocate pools for the Rotation matrices and Position vectors
+        Rs_pool, ps_pool = _rand_pose(N_REPEAT)
+        Rs_pool = jnp.array(Rs_pool, device=device)
+        ps_pool = jnp.array(ps_pool, device=device)
+
+        def _ik_single_fair():
+            times = []
+            for i in range(N_REPEAT):
+                # 2. Grab the unique pose for this iteration
+                R_input = Rs_pool[i]
+                p_input = ps_pool[i]
+                
+                t0 = time.perf_counter()
+                # 3. Execute and force synchronization
+                Q, v = ik_jit(R_input, p_input)
+                Q.block_until_ready()
+                
+                times.append(time.perf_counter() - t0)
+                
+            return float(np.median(times)) * 1e6
+
+        t_fk = _fk_single_fair()
+        t_ik = _ik_single_fair()
         key = f"jax_{dev_name}"
         results[key]["fk"][1]  = t_fk
         results[key]["ik"][1]  = t_ik
@@ -115,25 +152,46 @@ def bench_jax(robot, results, n_warmup=N_WARMUP):
         ik_vmap = jax.jit(jax.vmap(ik_full), backend=dev_name)
 
         for B in BATCH_SIZES_JAX:
-            q_b  = jnp.array(_rand_q(B), device=device)
-            Rs_b = jnp.array(_rand_pose(B)[0], device=device)
-            ps_b = jnp.array(_rand_pose(B)[1], device=device)
+            # 1. Create a buffer that is B + N_REPEAT long
+            # This allows us to take N_REPEAT different slices of size B
+            q_pool = jnp.array(_rand_q(B + N_REPEAT), device=device)
+            Rs_raw, ps_raw = _rand_pose(B + N_REPEAT)
+            Rs_pool = jnp.array(Rs_raw, device=device)
+            ps_pool = jnp.array(ps_raw, device=device)
 
-            # warmup for this batch size
+            # warmup (using the first slice)
             for _ in range(5):
-                [x.block_until_ready() for x in jax.tree_util.tree_leaves(fk_vmap(q_b))]
-                [x.block_until_ready() for x in jax.tree_util.tree_leaves(ik_vmap(Rs_b, ps_b))]
+                q_warm = q_pool[:B]
+                [x.block_until_ready() for x in jax.tree_util.tree_leaves(fk_vmap(q_warm))]
 
-            def _fk_batch():
-                R, p = fk_vmap(q_b)
-                R.block_until_ready()
+            # 2. Custom timing loop with sliding window
+            def _run_batched_fk():
+                times = []
+                for i in range(N_REPEAT):
+                    # Grab a unique slice: every iteration is numerically different
+                    q_slice = q_pool[i : i + B]
+                    
+                    t0 = time.perf_counter()
+                    R, p = fk_vmap(q_slice)
+                    # Synchronize on the output to ensure math is done
+                    R.block_until_ready()
+                    times.append(time.perf_counter() - t0)
+                return (float(np.median(times)) * 1e6) / B
 
-            def _ik_batch():
-                Q, v = ik_vmap(Rs_b, ps_b)
-                Q.block_until_ready()
+            def _run_batched_ik():
+                times = []
+                for i in range(N_REPEAT):
+                    R_slice = Rs_pool[i : i + B]
+                    p_slice = ps_pool[i : i + B]
+                    
+                    t0 = time.perf_counter()
+                    Q, v = ik_vmap(R_slice, p_slice)
+                    Q.block_until_ready()
+                    times.append(time.perf_counter() - t0)
+                return (float(np.median(times)) * 1e6) / B
 
-            t_fk = _timer(_fk_batch, N_REPEAT) / B
-            t_ik = _timer(_ik_batch, N_REPEAT) / B
+            t_fk = _run_batched_fk()
+            t_ik = _run_batched_ik()
             results[key]["fk"][B] = t_fk
             results[key]["ik"][B] = t_ik
             print(f"    fk  B={B:<5}: {_fmt(t_fk)}/call")

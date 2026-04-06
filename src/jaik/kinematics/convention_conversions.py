@@ -40,5 +40,4 @@ def dh_to_kin(alpha_vec, a_vec, d_vec):
         'H': H,
         'P': P,
         'joint_type': np.zeros(N),
-        'RT': RT,
     }

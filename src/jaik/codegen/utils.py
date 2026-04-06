@@ -30,7 +30,7 @@ def _sym_rot(k_vec, s_theta, c_theta):
         [t*kx*kz - s*ky, t*ky*kz + s*kx, t*kz*kz + c   ],
     ])
 
-def _generate_param_symbols(H_num, P_num):
+def _generate_param_symbols(H_num, P_num, RT_num):
     param_map = {}
     
     def _sym_vec(arr, name):
@@ -51,8 +51,10 @@ def _generate_param_symbols(H_num, P_num):
 
     H_sym = [_sym_vec(H_num[:, j], f"H{j}") for j in range(6)]
     P_sym = [_sym_vec(P_num[:, j], f"P{j}") for j in range(7)]
+    RT_sym = [_sym_vec(RT_num[:, j], f"RT{j}") for j in range(3)]
+    RT_mat = sp.Matrix.hstack(*RT_sym)
     
-    return H_sym, P_sym, param_map
+    return H_sym, P_sym, RT_mat, param_map
 
 class _JnpPrinter(PythonCodePrinter):    
     def __init__(self, settings=None):

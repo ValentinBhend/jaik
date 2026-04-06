@@ -54,11 +54,13 @@ def _sp3(p1, p2, k, d):
     # Raw sine and cosine components
     s1_raw, c1_raw = x_ls0 + xi * A_perp0, x_ls1 + xi * A_perp1
     s2_raw, c2_raw = x_ls0 - xi * A_perp0, x_ls1 - xi * A_perp1
+
+    # return (s1_raw/norm_A, c1_raw/norm_A), (s2_raw/norm_A, c2_raw/norm_A)
     
     # Normalize to ensure unit vectors (sin^2 + cos^2 = 1)
     mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
     mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
-    
+
     return (s1_raw/mag1, c1_raw/mag1), (s2_raw/mag2, c2_raw/mag2)
 
 def _sp4(p, k, h, d):
@@ -89,6 +91,9 @@ def _sp4(p, k, h, d):
     # Solution 2
     s2_raw = x_ls0 - xi * A1v
     c2_raw = x_ls1 + xi * A0
+
+    # mag = sp.sqrt(norm_A2) --> fails eval
+    # return (s1_raw/mag, c1_raw/mag), (s2_raw/mag, c2_raw/mag)
     
     mag1 = sp.sqrt(s1_raw**2 + c1_raw**2)
     mag2 = sp.sqrt(s2_raw**2 + c2_raw**2)
