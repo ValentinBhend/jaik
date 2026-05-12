@@ -83,7 +83,6 @@ def make_robot(
                                    q:     (6,) joint angles, NaN = infeasible
                                    branch: integer branch index
     """
-
     kin, codegen_id = _resolve_robot(robot)
     _fk, _ik_full = _load_solvers(solver, kin, codegen_id)
     fk, ik_full, ik_closest = _wrap_solvers(_fk, _ik_full, solver, format, sincos)
@@ -169,34 +168,23 @@ def _wrap_solver_jax(_fk, _ik_full, format, sincos):
         return sq, cq, valid
     
     if not sincos:
-        fk_orig = fk
-        ik_full_orig = ik_full
-        def fk(q):
+        def fk(q, _orig=fk):          # _orig captures current value, not the name
             sq, cq = jnp.sin(q), jnp.cos(q)
-            return fk_orig(sq, cq)
-        def ik_full(R, p):
-            sq, cq, valid = ik_full_orig(R, p)
-            q = jnp.atan2(sq, cq)
-            return q, valid
-    
-    if format == "Rp":
-        pass
-    elif format == "T":
-        fk_orig = fk
-        ik_full_orig = ik_full
-        def fk(*args):
-            R, p = fk_orig(*args)
+            return _orig(sq, cq)
+        def ik_full(R, p, _orig=ik_full):
+            sq, cq, valid = _orig(R, p)
+            return jnp.atan2(sq, cq), valid
+
+    if format == "T":
+        def fk(*args, _orig=fk):      # same pattern, no shared variable name
+            R, p = _orig(*args)
             T = jnp.concatenate([
                 jnp.concatenate([R, p[:,None]], axis=1),
                 jnp.array([[0., 0., 0., 1.]])
             ], axis=0)
             return T
-        def ik_full(T):
-            R = T[:3,:3]
-            p = T[:3,3]
-            return ik_full_orig(R, p)
-    else:
-        raise ValueError
+        def ik_full(T, _orig=ik_full):
+            return _orig(T[:3,:3], T[:3,3])
 
     def ik_closest():
         raise NotImplementedError
